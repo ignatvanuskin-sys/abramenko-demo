@@ -49,6 +49,17 @@ def _is_about_zhambyla(t: str) -> bool:
 def _is_about_buketova(t: str) -> bool:
     return "букетов" in t
 
+TRAINING_RELEVANT = [
+    "колорист", "окраш", "парикмахер", "стриж", "балаяж", "airtouch",
+    "мелир", "блонд", "бров", "ресниц", "ногт", "маникюр", "педикюр",
+    "визаж", "косметолог", "наращиван", "завивк", "ботокс", "салон", "красот",
+    "прикорнев", "холодн", "восстановл", "контуринг", "dim", "тотал",
+]
+
+def is_training_relevant(topic: str) -> bool:
+    t = topic.lower()
+    return any(kw in t for kw in TRAINING_RELEVANT)
+
 def _is_question_about_branch_detail(t: str) -> bool:
     return any(w in t for w in ["что на", "что есть", "расскаж", "что у вас", "какие услуги", "что делаете на"])
 
@@ -190,7 +201,7 @@ def detect_intent(text: str):
             return "vacancy"
         return "vacancy"
     if any(w in t for w in ["работ", "трудоустр"]):
-        if "работ" in t and any(w in t for w in ["ищете", "у вас", "есть", "хочу"]):
+        if "работ" in t and any(w in t for w in ["ищете", "ищу", "ищем", "у вас", "есть", "хочу"]):
             return "vacancy"
         if "мастером" in t:
             return "vacancy"
@@ -311,6 +322,26 @@ def reply(state: DialogState, user_text: str) -> str:
                 return llm_ans
             return "Здравствуйте! Abramenko Studio. Что вас интересует — запись, модель, вакансия или обучение?"
         state.intent = intent
+        # training — сразу отсекаем нерелевантное (прямо на старте, если уже есть тема)
+        if intent == "training" and not is_training_relevant(text):
+            generic = low.strip() in ["хочу купить курсы", "хочу курсы", "курсы", "обучение", "хочу обучение", "хочу пройти курс", "обучение есть?", "курс колорист с нуля"]
+            if not generic and any(kw in low for kw in ["программ", "английск", "математ", "python", "таргет", "инвест", "финанс", "бизнес", "маркет"]):
+                short = text.strip()[:40] + ("…" if len(text.strip()) > 40 else "")
+                state.intent = None
+                state.step = "start"
+                return f"Поняла 😊 Обучение {short} у нас не проводится. Мы обучаем направлениям, связанным с услугами студии. Если вас интересует обучение в сфере красоты, подскажу подробнее."
+        if intent == "vacancy" and not is_training_relevant(text):
+            if any(kw in low for kw in ["повар", "водител", "курьер", "официант", "программ", "кладовщик"]):
+                short = text.strip()[:40] + ("…" if len(text.strip()) > 40 else "")
+                state.intent = None
+                state.step = "start"
+                return f"Поняла 😊 Вакансия {short} у нас сейчас не открыта. Сейчас ищем мастеров бьюти-сферы."
+        if intent == "model" and not is_training_relevant(text):
+            if any(kw in low for kw in ["программ", "английск", "математ", "python", "таргет"]):
+                short = text.strip()[:40] + ("…" if len(text.strip()) > 40 else "")
+                state.intent = None
+                state.step = "start"
+                return f"Поняла 😊 Модель для {short} нам сейчас не требуется. Ищем моделей для процедур салона."
         # предзаполнение из свободного текста (имя, филиал, волосы, время) — чтобы не спрашивать повторно
         if intent == "booking":
             if _is_about_zhambyla(low):
@@ -377,6 +408,38 @@ def reply(state: DialogState, user_text: str) -> str:
         _remember_clarify(state, text)
         # для не-booking веток — идём в портфолио, а не в time
         if state.intent in ("vacancy", "model", "training"):
+            # training/vacancy/model — проверяем релевантность перед сбором лида
+            if state.intent == "training":
+                topic = text.strip()
+                if topic and not is_training_relevant(topic):
+                    generic = topic.lower().strip() in ["хочу купить курсы", "хочу курсы", "курсы", "обучение", "хочу обучение"]
+                    if not generic:
+                        short = topic[:40] + ("…" if len(topic) > 40 else "")
+                        state.intent = None
+                        state.service = None
+                        state.step = "start"
+                        return f"Поняла 😊 Обучение {short} у нас не проводится. Мы обучаем направлениям, связанным с услугами студии. Если вас интересует обучение в сфере красоты, подскажу подробнее."
+            elif state.intent == "vacancy":
+                topic = text.strip()
+                if topic and not is_training_relevant(topic):  # вакансии салона — те же ключи
+                    generic = topic.lower().strip() in ["парикмахер", "мастер", "вакансия", "работа"]
+                    if not generic and len(topic.split()) <= 3:
+                        # короткая нерелевантная специализация типа "повар", "водитель"
+                        short = topic[:40] + ("…" if len(topic) > 40 else "")
+                        state.intent = None
+                        state.service = None
+                        state.step = "start"
+                        return f"Поняла 😊 Вакансия {short} у нас сейчас не открыта. Сейчас ищем мастеров бьюти-сферы. Если интересует beauty-направление, подскажу."
+            elif state.intent == "model":
+                topic = text.strip()
+                if topic and len(topic.split()) <= 4 and not is_training_relevant(topic):
+                    # модель для не-бьюти процедуры — не релевантно
+                    if any(kw in topic.lower() for kw in ["программ", "английск", "математ", "python", "таргет"]):
+                        short = topic[:40] + ("…" if len(topic) > 40 else "")
+                        state.intent = None
+                        state.service = None
+                        state.step = "start"
+                        return f"Поняла 😊 Модель для {short} нам сейчас не требуется. Ищем моделей для процедур салона. Если интересует beauty-модель, подскажу."
             state.step = "portfolio"
             if state.intent == "vacancy":
                 return "Понял. Можете отправить портфолио или рассказать об опыте?"

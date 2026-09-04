@@ -60,6 +60,63 @@ def is_training_relevant(topic: str) -> bool:
     t = topic.lower()
     return any(kw in t for kw in TRAINING_RELEVANT)
 
+SALON_KEYWORDS = [
+    "салон", "абраменко", "madame", "мадам", "услуг", "цен", "стоим", "прайс",
+    "окраш", "стриж", "балаяж", "волос", "ногт", "маникюр", "педикюр", "бров",
+    "ресниц", "лазер", "эпиляц", "визаж", "макияж", "наращиван", "завивк",
+    "ботокс", "запис", "филиал", "адрес", "жамбыл", "букетов", "обуч", "курс",
+    "колорист", "мастер", "ваканс", "модел", "портфолио", "время", "будни",
+    "выходн", "администратор", "контакт", "телефон", "имя", "парков", "отзыв",
+    "рейтинг", "премия", "свадеб", "прическ", "прикорнев", "холодн",
+]
+
+OFF_TOPIC_KEYWORDS = [
+    "вуз", "университет", "универ", "поступить", "поступление", "абитуриент",
+    "егэ", " ент", "колледж", "институт", "программирован", " python", "питон",
+    "английск", "математик", "автомобил", "ремонт", "путешеств", "погода",
+    "новост", "политик", "президент", "выборы", "крипт", "биткоин", "инвестиц",
+    "акции", "трейдинг", "игра", "гейм", "футбол", "спорт", "школьн",
+]
+
+def _is_on_topic_deterministic(text: str) -> bool | None:
+    t = text.lower()
+    has_salon = any(kw in t for kw in SALON_KEYWORDS)
+    has_off = any(kw in t for kw in OFF_TOPIC_KEYWORDS)
+    if has_salon and not has_off:
+        return True
+    if has_off and not has_salon:
+        return False
+    if has_salon and has_off:
+        # смешанный — считаем on_topic, пусть training relevance решит
+        return True
+    return None  # неоднозначно — нужен LLM
+
+def _is_off_topic_llm(text: str) -> bool | None:
+    try:
+        from .llm_client import llm_available, classify_on_topic
+        if not llm_available():
+            return None
+        # не вызываем LLM внутри booking flow
+        return not classify_on_topic(text)
+    except Exception:
+        return None
+
+def is_off_topic(text: str, state) -> bool:
+    # внутри booking flow не считаем off_topic, чтобы не прерывать запись
+    if state.step not in ("start", "done") and state.intent is not None:
+        return False
+    det = _is_on_topic_deterministic(text)
+    if det is True:
+        return False
+    if det is False:
+        return True
+    # неоднозначно — пробуем LLM
+    llm_res = _is_off_topic_llm(text)
+    if llm_res is not None:
+        return llm_res
+    # без LLM — считаем on_topic, чтобы не блокировать
+    return False
+
 def _is_question_about_branch_detail(t: str) -> bool:
     return any(w in t for w in ["что на", "что есть", "расскаж", "что у вас", "какие услуги", "что делаете на"])
 
@@ -101,9 +158,20 @@ def faq_answer(text: str):
             "Какой филиал вам удобнее?"
         )
 
-    # 2. Что на Жамбыла? — только Madame
+    # 2. Локальные услуги — жёсткая привязка (проверяем до общего "что на")
+    if any(w in t for w in ["бров"]):
+        return "Да, брови есть на Букетова 61. На Жамбыла 127 по этой услуге уточню у администратора.\n\nКакой филиал вам удобнее?"
+    if "лазер" in t or "лазерн" in t:
+        return "Да, лазерная эпиляция есть на Букетова 61. На Жамбыла 127 по этой услуге уточню у администратора.\n\nКакой филиал вам удобнее?"
+    if "мужской маникюр" in t or "мужской педикюр" in t:
+        return "Да, мужской маникюр/педикюр есть на Жамбыла 127 (Madame).\n\nКакой филиал вам удобнее?"
+    if "мужской" in t and ("маникюр" in t or "педикюр" in t):
+        return "Да, мужской маникюр/педикюр есть на Жамбыла 127 (Madame).\n\nКакой филиал вам удобнее?"
+    if "свадеб" in t:
+        return "Да, свадебные и вечерние причёски есть на Жамбыла 127 (Madame). Уточните дату — передам как срочное.\n\nКакой филиал вам удобнее?"
+
+    # 3. Что на Жамбыла? — только Madame (общая инфа)
     if _is_about_zhambyla(t) and ("что" in t or _is_question_about_branch_detail(t) or len(t.split()) <= 4):
-        # если вопрос явно про филиал (что на/расскажи/какие услуги) — только Madame
         if any(w in t for w in ["что", "расскаж", "услуг", "парков", "рейтинг", "премия", "победитель"]):
             return (
                 "📍 Madame — ул. Жамбыла, 127\n"
@@ -113,7 +181,6 @@ def faq_answer(text: str):
                 "Подтверждено для этой точки: свадебные и вечерние причёски, мужской маникюр/педикюр, гель-лак, аппаратный маникюр, наращивание гелем.\n\n"
                 "Какой филиал вам удобнее?"
             )
-        # даже без "что" — если просто "жамбыла 127?" — дать инфо
         if t.count("жамбыл") >= 1 and len(t) < 40:
             return (
                 "📍 Madame — ул. Жамбыла, 127\n"
@@ -123,7 +190,7 @@ def faq_answer(text: str):
                 "Какой филиал вам удобнее?"
             )
 
-    # 3. Что на Букетова? — только Abramenko Studio
+    # 4. Что на Букетова? — только Abramenko Studio
     if _is_about_buketova(t) and ("что" in t or _is_question_about_branch_detail(t) or len(t.split()) <= 4):
         if any(w in t for w in ["что", "расскаж", "услуг", "бров", "лазер"]):
             b1 = BRANCHES[0]
@@ -134,23 +201,6 @@ def faq_answer(text: str):
                 "Подтверждено для этой точки: коррекция/ламинирование бровей, лазерная эпиляция.\n\n"
                 "Какой филиал вам удобнее?"
             )
-
-    # 4. Локальные услуги — жёсткая привязка
-    # брови / лазер → только Букетова
-    if any(w in t for w in ["бров"]):
-        # если спрашивают именно про брови
-        if "делаете" in t or "есть" in t or "бров" in t:
-            return "Да, брови есть на Букетова 61. На Жамбыла 127 по этой услуге уточню у администратора.\n\nКакой филиал вам удобнее?"
-    if "лазер" in t or "лазерн" in t:
-        return "Да, лазерная эпиляция есть на Букетова 61. На Жамбыла 127 по этой услуге уточню у администратора.\n\nКакой филиал вам удобнее?"
-    # мужской маникюр → только Жамбыла
-    if "мужской маникюр" in t or "мужской педикюр" in t:
-        return "Да, мужской маникюр/педикюр есть на Жамбыла 127 (Madame).\n\nКакой филиал вам удобнее?"
-    if "мужской" in t and ("маникюр" in t or "педикюр" in t):
-        return "Да, мужской маникюр/педикюр есть на Жамбыла 127 (Madame).\n\nКакой филиал вам удобнее?"
-    # свадебные причёски → только Жамбыла
-    if "свадеб" in t:
-        return "Да, свадебные и вечерние причёски есть на Жамбыла 127 (Madame). Уточните дату — передам как срочное.\n\nКакой филиал вам удобнее?"
 
     if "парков" in t:
         return "На Жамбыла в 2ГИС указана бесплатная парковка на 7 мест. Детали подскажет администратор при звонке."
@@ -278,6 +328,10 @@ def reply(state: DialogState, user_text: str) -> str:
             name = state.name or ""
             state.step = "done"
             return f"Принял, {name}. {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
+
+    # 0.5 off_topic защита — до FAQ и intent, не меняем state и не собираем лид
+    if is_off_topic(text, state):
+        return "Поняла 😊 Я могу помочь только по вопросам Abramenko Studio: услуги, цены, запись, обучение в сфере красоты, вакансии или модели. Что вас интересует?"
 
     # 1. FAQ — только если это похоже на вопрос, и не перебиваем слоты время/филиал/имя/телефон
     if state.step in ("time", "branch", "await_name", "await_phone", "clarify_hair", "portfolio"):

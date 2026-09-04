@@ -13,6 +13,7 @@ import re
 from .config import BRANCHES, PRICES, SALON, UNKNOWN_ANSWER
 
 PHONE_RE = re.compile(r"(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}")
+NAME_RE = re.compile(r"(?:я\s+([А-ЯЁ][а-яё]{2,})|меня\s+зовут\s+([А-ЯЁ][а-яё]{2,})|зовут\s+([А-ЯЁ][а-яё]{2,}))")
 
 
 class DialogState:
@@ -310,10 +311,57 @@ def reply(state: DialogState, user_text: str) -> str:
                 return llm_ans
             return "Здравствуйте! Abramenko Studio. Что вас интересует — запись, модель, вакансия или обучение?"
         state.intent = intent
-        # если сразу назвали филиал — запомним
-        if intent == "booking" and (_is_about_zhambyla(low) or _is_about_buketova(low)):
-            state.branch = text
-        if intent == "booking" and _is_coloring(low):
+        # предзаполнение из свободного текста (имя, филиал, волосы, время) — чтобы не спрашивать повторно
+        if intent == "booking":
+            if _is_about_zhambyla(low):
+                state.branch = "Жамбыла 127"
+            elif _is_about_buketova(low):
+                state.branch = "Букетова 61"
+            if "окрашен" in low or "крашен" in low:
+                state.hair = "окрашены"
+            elif "натуральн" in low or "свой цвет" in low or "свои " in low or "натуральн" in low:
+                state.hair = "свой цвет"
+            if "выходн" in low or "суббот" in low or "воскрес" in low:
+                state.time_pref = "выходные"
+            elif "будн" in low or "понедельник" in low or "вторник" in low or "сред" in low or "четверг" in low or "пятниц" in low:
+                state.time_pref = "будни"
+            if "утр" in low and state.time_pref:
+                if "утр" not in state.time_pref:
+                    state.time_pref += " утром"
+            elif "вечер" in low and state.time_pref:
+                if "вечер" not in state.time_pref:
+                    state.time_pref += " вечером"
+            elif "утр" in low and not state.time_pref:
+                state.time_pref = "утром"
+            elif "вечер" in low and not state.time_pref:
+                state.time_pref = "вечером"
+            m_name = NAME_RE.search(text)
+            if m_name and not state.name:
+                cand = next((g for g in m_name.groups() if g), None)
+                if cand:
+                    state.name = cand.capitalize()
+            # если сразу сказали услугу с окрашиванием — сохраним
+            if _is_coloring(low):
+                state.service = text
+            # переходим к первому незаполненному шагу
+            if not state.service:
+                state.step = "clarify"
+                return _clarify_question(state, text)
+            if not state.hair:
+                state.step = "clarify_hair"
+                return "Балаяж — это красиво, но результат сильно зависит от того, что сейчас с волосами. Они сейчас окрашены или свой цвет?"
+            if not state.time_pref:
+                state.step = "time"
+                return "Понял. Вам удобнее в будни или в выходные? Утром или ближе к вечеру?"
+            if not state.branch:
+                state.step = "branch"
+                return "Какой филиал удобнее — Букетова, 61 (Евразийский рынок) или Жамбыла, 127 Madame (Конституции Казахстана)?"
+            if not state.name:
+                state.step = "await_name"
+                return "Хорошо. Как вас зовут?"
+            state.step = "await_phone"
+            return f"{state.name}, какой номер для связи — администратор перезвонит?"
+        if intent == "booking" and _is_coloring(low) and not state.service:
             state.service = text
             state.step = "clarify_hair"
             return "Балаяж — это красиво, но результат сильно зависит от того, что сейчас с волосами. Они сейчас окрашены или свой цвет?"
@@ -344,6 +392,31 @@ def reply(state: DialogState, user_text: str) -> str:
         return "Понял. Вам удобнее в будни или в выходные? Утром или ближе к вечеру?"
 
     if state.step == "clarify_hair":
+        # если ответ содержит время+филиал — не перезаписываем волосы
+        if _is_about_zhambyla(low) or _is_about_buketova(low) or "выходн" in low or "суббот" in low or "будн" in low:
+            if _is_about_zhambyla(low):
+                state.branch = "Жамбыла 127"
+            elif _is_about_buketova(low):
+                state.branch = "Букетова 61"
+            if "выходн" in low or "суббот" in low or "воскрес" in low:
+                state.time_pref = "выходные"
+            elif "будн" in low:
+                state.time_pref = "будни"
+            # волосы уже есть, идём к времени/филиалу с учётом предзаполнения
+            if state.time_pref and state.branch:
+                if state.name:
+                    state.step = "await_phone"
+                    return f"{state.name}, какой номер для связи — администратор перезвонит?"
+                state.step = "await_name"
+                return "Хорошо. Как вас зовут?"
+            if state.time_pref:
+                state.step = "branch" if not state.branch else "await_name"
+                if state.branch:
+                    if state.name:
+                        state.step = "await_phone"
+                        return f"{state.name}, какой номер для связи — администратор перезвонит?"
+                    return "Хорошо. Как вас зовут?"
+                return "Какой филиал удобнее — Букетова, 61 (Евразийский рынок) или Жамбыла, 127 Madame (Конституции Казахстана)?"
         state.hair = text
         # для booking после волос — время, для остальных уже ушли в portfolio
         state.step = "time"
@@ -351,13 +424,33 @@ def reply(state: DialogState, user_text: str) -> str:
 
     if state.step == "portfolio":
         state.portfolio = text
+        if state.name:
+            state.step = "await_phone"
+            return f"{state.name}, какой номер для связи — администратор перезвонит?"
         state.step = "await_name"
         return "Спасибо! Как вас зовут?"
 
     # 4. Время
     if state.step == "time":
-        state.time_pref = text
+        # извлекаем филиал если назвали вместе с временем
+        if _is_about_zhambyla(low):
+            state.branch = "Жамбыла 127"
+        elif _is_about_buketova(low):
+            state.branch = "Букетова 61"
+        if "выходн" in low or "суббот" in low or "воскрес" in low:
+            state.time_pref = "выходные" + (" утром" if "утр" in low else " вечером" if "вечер" in low else "")
+        elif "будн" in low or "понедел" in low or "вторник" in low or "сред" in low or "четверг" in low or "пятниц" in low:
+            state.time_pref = "будни" + (" утром" if "утр" in low else " вечером" if "вечер" in low else "")
+        elif "утр" in low:
+            state.time_pref = "утром"
+        elif "вечер" in low:
+            state.time_pref = "вечером"
+        else:
+            state.time_pref = text
         if state.branch:
+            if state.name:
+                state.step = "await_phone"
+                return f"{state.name}, какой номер для связи — администратор перезвонит?"
             state.step = "await_name"
             return "Хорошо. Как вас зовут?"
         state.step = "branch"
@@ -366,10 +459,15 @@ def reply(state: DialogState, user_text: str) -> str:
     # 5. Филиал
     if state.step == "branch":
         if state.branch:
-            # филиал уже выбран ранее (например, после "где вы?" → "Жамбыла")
+            if state.name:
+                state.step = "await_phone"
+                return f"{state.name}, какой номер для связи — администратор перезвонит?"
             state.step = "await_name"
             return "Хорошо. Как вас зовут?"
         state.branch = text
+        if state.name:
+            state.step = "await_phone"
+            return f"{state.name}, какой номер для связи — администратор перезвонит?"
         state.step = "await_name"
         return "Хорошо. Как вас зовут?"
 

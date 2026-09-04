@@ -99,22 +99,17 @@ app.add_middleware(
 def health():
     return {"status": "ok", "sessions": len(_WEB_STORE)}
 
+WEB_GREETING = "Здравствуйте! 👋 Я администратор Abramenko Studio. Помогу с услугами и записью. Что вас интересует?"
+
 @app.post("/api/reset")
 def reset(req: ResetRequest):
     sid = (req.session_id or "").strip() or str(uuid.uuid4())
     _reset_state(sid)
-    st = _WEB_STORE[sid]
-    # начальное приветствие как в bot_logic start
-    greeting = reply(st, "")
-    # но reply на пустую строку вернёт стартовый вопрос — используем его
-    # если greeting пустой, fallback
-    if not greeting:
-        greeting = "Здравствуйте! 👋 Я помогу подобрать услугу и записаться в студию. Чем могу помочь?"
     return ChatResponse(
-        message=greeting,
-        buttons=_web_buttons_for_step(st.step),
+        message=WEB_GREETING,
+        buttons=["Хочу записаться", "Услуги и цены", "Адреса"],
         done=False,
-        step=st.step,
+        step="start",
     )
 
 @app.post("/api/chat", response_model=ChatResponse)
@@ -130,11 +125,10 @@ async def chat(req: ChatRequest):
     st = _get_state(sid)
     # защита от чужого session_id — изоляция по ключу, чтение только своего состояния
     try:
-        # анти-спам: если сообщение пустое и уже не start — не ломаем
+        # старт — красивое приветствие, а не формальный список веток
         if raw.strip() == "" and st.step == "start":
-            answer = reply(st, "")
-        else:
-            answer = reply(st, raw)
+            return ChatResponse(message=WEB_GREETING, buttons=["Хочу записаться", "Услуги и цены", "Адреса"], done=False, step="start")
+        answer = reply(st, raw)
     except Exception as e:
         logger.exception("web reply failed sid=%s: %s", sid[:8], e)
         answer = "Что-то пошло не так, попробуйте ещё раз."

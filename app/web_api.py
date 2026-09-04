@@ -41,6 +41,8 @@ def _web_buttons_for_step(step: str) -> List[str]:
         return ["Окрашивание", "Стрижка", "Ногти", "Другое"]
     if step == "clarify_hair":
         return ["Окрашены", "Свой цвет", "Был кератин"]
+    if step == "portfolio":
+        return ["Есть портфолио", "Опыт 2 года", "Начинающий"]
     if step == "time":
         return ["Будни", "Выходные", "Утром", "Вечером", "Будни утром"]
     if step == "branch":

@@ -5,7 +5,7 @@ from .prompt_loader import load_system_prompt
 def llm_available() -> bool:
     return bool(os.getenv("OPENAI_API_KEY"))
 
-def llm_reply(messages: list[dict]) -> str:
+def llm_reply(messages: list[dict], temperature: float = 0.4) -> str:
     """Вызывается только если есть OPENAI_API_KEY. Требует pip install openai."""
     from openai import OpenAI
     client = OpenAI(
@@ -17,7 +17,7 @@ def llm_reply(messages: list[dict]) -> str:
     resp = client.chat.completions.create(
         model=model,
         messages=[{"role": "system", "content": system}, *messages],
-        temperature=0.4,
+        temperature=temperature,
         max_tokens=300,
     )
     return resp.choices[0].message.content.strip()

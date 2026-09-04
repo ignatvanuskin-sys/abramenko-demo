@@ -29,19 +29,20 @@ def get_admin_chat_id() -> Optional[int]:
 def is_booking_complete(state) -> bool:
     """Определяет завершённость заявки по фактическому состоянию DialogState.
 
-    Не по тексту ответа, а по полям. Требует наличия всех ключевых данных
-    и step == 'done'. Intent может быть booking/model/vacancy/training — все
-    ветки собирают одинаковый набор (услуга/время/филиал/имя/телефон).
+    Не по тексту ответа, а по полям. Для booking требует service/time/branch/name/phone,
+    для vacancy/model/training — service/name/phone (portfolio опционален, время/филиал не требуются).
     """
-    return (
-        getattr(state, "step", None) == "done"
-        and getattr(state, "phone", None)
-        and getattr(state, "name", None)
-        and getattr(state, "branch", None)
-        and getattr(state, "time_pref", None)
-        and getattr(state, "service", None)
-        and getattr(state, "intent", None) is not None
-    )
+    if getattr(state, "step", None) != "done":
+        return False
+    if not getattr(state, "phone", None) or not getattr(state, "name", None) or not getattr(state, "service", None):
+        return False
+    intent = getattr(state, "intent", None)
+    if intent not in ("booking", "vacancy", "model", "training"):
+        return False
+    if intent == "booking":
+        return bool(getattr(state, "branch", None) and getattr(state, "time_pref", None))
+    # vacancy/model/training — достаточно базы
+    return True
 
 
 def build_admin_message(state, user_id: int, username: Optional[str]) -> str:

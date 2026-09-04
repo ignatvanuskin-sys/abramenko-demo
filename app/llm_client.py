@@ -201,3 +201,44 @@ def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
 def _reset_cache():
     global _system_prompt_cache
     _system_prompt_cache = None
+
+def classify_on_topic(user_text: str) -> bool:
+    """Возвращает True если on_topic, False если off_topic. Использует LLM."""
+    cfg = _get_config()
+    if not cfg:
+        raise RuntimeError("LLM not configured")
+    # короткий промпт для классификации, без полного прайса
+    system = (
+        "Ты классификатор для салона красоты Abramenko Studio. "
+        "on_topic=true если сообщение про: услуги/цены/волосы/ногти/брови/лазер/визаж/запись/филиалы/обучение beauty/вакансия beauty/модель beauty/мастеров/время. "
+        "on_topic=false если про: вуз/университет/программирование/Python/английский/школу/математику/авто/игры/политику/погоду/новости/крипто/инвестиции/ремонт/путешествия и т.п. "
+        "Если есть сомнение и хоть как-то можно связать с салоном — true. Иначе false. "
+        "Ответ строго JSON: {\"on_topic\": true} или {\"on_topic\": false}"
+    )
+    from openai import OpenAI
+    import json as _json
+    client = OpenAI(api_key=cfg["api_key"], base_url=cfg["base_url"], timeout=int(cfg["timeout"]), max_retries=0)
+    resp = client.chat.completions.create(
+        model=cfg["model"],
+        messages=[{"role": "system", "content": system}, {"role": "user", "content": user_text}],
+        temperature=0,
+        max_tokens=10,
+        top_p=1,
+    )
+    content = (resp.choices[0].message.content or "").strip().lower()
+    # парсим JSON или ищем true/false
+    try:
+        data = _json.loads(content)
+        if isinstance(data, dict) and "on_topic" in data:
+            return bool(data["on_topic"])
+    except Exception:
+        pass
+    if '"on_topic": true' in content or '"on_topic":true' in content or "true" in content:
+        # простая эвристика
+        if "false" in content and "true" not in content.split("false")[0]:
+            return False
+        return True
+    if "false" in content:
+        return False
+    # по умолчанию считаем on_topic
+    return True

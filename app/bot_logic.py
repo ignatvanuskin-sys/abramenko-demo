@@ -34,7 +34,8 @@ def _find_price(text: str):
     for key, val in PRICES.items():
         if key in t:
             return val
-    if "окрашиван" in t or "airtouch" in t or "балаяж" in t or "мелирован" in t or "блонд" in t:
+    # опечатки: балияж/балаж
+    if "окрашиван" in t or "airtouch" in t or "балаяж" in t or "балияж" in t or "балаж" in t or "мелирован" in t or "блонд" in t:
         return "Балаяж / AirTouch / мелирование — 25 000–80 000 ₸, точную сумму назовут на консультации"
     if "стрижк" in t:
         return f"{PRICES['женская стрижка']}, {PRICES['мужская стрижка']}"
@@ -152,7 +153,7 @@ def faq_answer(text: str):
         return f"Через WhatsApp {SALON['whatsapp_main']} или Instagram {SALON['instagram']} — сейчас этим и занимаемся."
     if any(w in t for w in ["маникюр", "педикюр", "гель-лак", "гель лак", "ногт"]) and "мужской" not in t:
         return "В Madame указаны гель-лак, аппаратный маникюр, наращивание гелем, мужской маникюр/педикюр. Цену скажет администратор после консультации."
-    if "цен" in t or "стоим" in t or "сколько" in t or "прайс" in t:
+    if "цен" in t or "стоим" in t or "сколько" in t or "прайс" in t or "скок" in t:
         price = _find_price(text)
         if price:
             return f"{price}. Точная сумма зависит от длины и состояния волос, её назовут на консультации."
@@ -200,14 +201,18 @@ def detect_intent(text: str):
 
 
 def _is_coloring(text_low: str) -> bool:
-    return any(w in text_low for w in ["окраш", "балаяж", "блонд", "мелир", "airtouch", "шатуш", "контуринг", "dim-out", "dim out", "total blond"])
+    # терпим опечатки: балияж/балаж, мелир etc
+    return any(w in text_low for w in ["окраш", "балаяж", "балияж", "балаж", "блонд", "мелир", "airtouch", "шатуш", "контуринг", "dim-out", "dim out", "total blond"])
 
 
 def _looks_like_question(text: str) -> bool:
     t = text.strip().lower()
     if "?" in text:
         return True
-    return t.startswith(("сколько", "где ", "где?", "как ", "можно", "есть", "делаете", "какая", "какие", "что ", "подскажите", "а "))
+    # терпим опечатки скока/скольк
+    if any(w in t for w in ["скок", "сколь"]):
+        return True
+    return t.startswith(("сколько", "где ", "где?", "как ", "можно", "есть", "делаете", "какая", "какие", "что ", "подскажите", "а ", "скок"))
 
 
 def _is_inside_booking_flow(state) -> bool:

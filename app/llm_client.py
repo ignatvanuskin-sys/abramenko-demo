@@ -1,23 +1,184 @@
-"""LLM-режим поверх того же промпта. Без ключа проект работает в rule-based режиме."""
+"""LLM с provider abstraction и failover для WhatsApp-бота.
+
+Поддерживает OpenAI-compatible провайдеры (Groq, OpenAI) через один интерфейс.
+Без ключа — deterministic-only режим (safe fallback).
+
+Env:
+  LLM_PROVIDER=groq|openai   (default groq)
+  LLM_MODEL=openai/gpt-oss-120b  (для groq) / gpt-4o-mini (для openai)
+  LLM_API_KEY=...            (приоритет над OPENAI_API_KEY/GROQ_API_KEY)
+  LLM_BASE_URL=https://api.groq.com/openai/v1
+  LLM_TIMEOUT=5
+  LLM_MAX_TOKENS=180
+  LLM_FALLBACK_PROVIDER=openai (опционально)
+  LLM_FALLBACK_MODEL=gpt-4o-mini
+  LLM_FALLBACK_API_KEY=...
+  LLM_FALLBACK_BASE_URL=https://api.openai.com/v1
+
+Обратная совместимость: OPENAI_API_KEY/BASE_URL/MODEL работают как fallback.
+"""
+from __future__ import annotations
+
+import logging
 import os
+import time
+from typing import List, Dict, Optional
+
 from .prompt_loader import load_system_prompt
 
-def llm_available() -> bool:
-    return bool(os.getenv("OPENAI_API_KEY"))
+logger = logging.getLogger("abramenko.llm")
+_system_prompt_cache: Optional[str] = None
 
-def llm_reply(messages: list[dict], temperature: float = 0.4) -> str:
-    """Вызывается только если есть OPENAI_API_KEY. Требует pip install openai."""
+def _get_system_prompt() -> str:
+    global _system_prompt_cache
+    if _system_prompt_cache is None:
+        try:
+            _system_prompt_cache = load_system_prompt()
+        except Exception:
+            _system_prompt_cache = "Ты — администратор Abramenko Studio. Отвечай коротко, без выдумок."
+    return _system_prompt_cache
+
+def _get_config(prefix: str = "LLM") -> Optional[Dict[str, str]]:
+    """Собирает конфиг провайдера. Возвращает None если ключа нет."""
+    provider = (os.getenv(f"{prefix}_PROVIDER") or os.getenv("LLM_PROVIDER") or "").strip().lower()
+    # legacy OPENAI_*
+    api_key = (
+        os.getenv(f"{prefix}_API_KEY")
+        or os.getenv("LLM_API_KEY")
+        or os.getenv("GROQ_API_KEY")
+        or os.getenv("OPENAI_API_KEY")
+        or ""
+    ).strip()
+    if not api_key:
+        return None
+    base_url = (
+        os.getenv(f"{prefix}_BASE_URL")
+        or os.getenv("LLM_BASE_URL")
+        or os.getenv("OPENAI_BASE_URL")
+        or ""
+    ).strip()
+    model = (
+        os.getenv(f"{prefix}_MODEL")
+        or os.getenv("LLM_MODEL")
+        or os.getenv("OPENAI_MODEL")
+        or ""
+    ).strip()
+
+    # дефолты по провайдеру
+    if not provider:
+        # авто-определение по base_url или ключу
+        if "groq" in base_url.lower():
+            provider = "groq"
+        else:
+            provider = "groq" if os.getenv("GROQ_API_KEY") else "openai"
+
+    if not base_url:
+        if provider == "groq":
+            base_url = "https://api.groq.com/openai/v1"
+        elif provider == "openai":
+            base_url = "https://api.openai.com/v1"
+        else:
+            base_url = "https://api.openai.com/v1"
+
+    if not model:
+        if provider == "groq":
+            model = "openai/gpt-oss-120b"
+        else:
+            model = "gpt-4o-mini"
+
+    timeout = int(os.getenv(f"{prefix}_TIMEOUT") or os.getenv("LLM_TIMEOUT") or "5")
+    max_tokens = int(os.getenv(f"{prefix}_MAX_TOKENS") or os.getenv("LLM_MAX_TOKENS") or "180")
+
+    return {
+        "provider": provider,
+        "api_key": api_key,
+        "base_url": base_url,
+        "model": model,
+        "timeout": str(timeout),
+        "max_tokens": str(max_tokens),
+    }
+
+def _get_fallback_config() -> Optional[Dict[str, str]]:
+    # явный fallback — только если LLM_FALLBACK_API_KEY задан
+    if os.getenv("LLM_FALLBACK_API_KEY"):
+        fallback = _get_config("LLM_FALLBACK")
+        if fallback:
+            return fallback
+    # неявный: если primary groq, fallback openai если есть ключ
+    primary = _get_config("LLM")
+    if primary and primary["provider"] == "groq" and os.getenv("OPENAI_API_KEY"):
+        return {
+            "provider": "openai",
+            "api_key": os.getenv("OPENAI_API_KEY", "").strip(),
+            "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
+            "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
+            "timeout": os.getenv("LLM_TIMEOUT", "5"),
+            "max_tokens": os.getenv("LLM_MAX_TOKENS", "180"),
+        }
+    return None
+
+def llm_available() -> bool:
+    return _get_config() is not None
+
+def _call_openai_compatible(cfg: Dict[str, str], messages: List[Dict[str, str]], temperature: float) -> str:
     from openai import OpenAI
     client = OpenAI(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+        api_key=cfg["api_key"],
+        base_url=cfg["base_url"],
+        timeout=int(cfg["timeout"]),
+        max_retries=0,
     )
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    system = load_system_prompt()
+    system = _get_system_prompt()
+    # оптимизация скорости: короткий system — берём первые 4000 символов + правила
+    # полный промпт уже содержит филиалы/цены, но для WhatsApp важно уложиться в latency
+    # оставляем как есть, провайдер кэширует system
     resp = client.chat.completions.create(
-        model=model,
+        model=cfg["model"],
         messages=[{"role": "system", "content": system}, *messages],
         temperature=temperature,
-        max_tokens=300,
+        max_tokens=int(cfg["max_tokens"]),
+        top_p=1,
     )
-    return resp.choices[0].message.content.strip()
+    content = resp.choices[0].message.content
+    return (content or "").strip()
+
+def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
+    """Основной вызов с failover. Никогда не должен вешать WhatsApp webhook."""
+    # ограничим контекст: последние 6 сообщений максимум
+    msgs = messages[-6:] if len(messages) > 6 else messages
+    # быстрый путь — primary
+    cfg = _get_config()
+    if not cfg:
+        raise RuntimeError("LLM not configured")
+
+    start = time.monotonic()
+    last_err: Optional[Exception] = None
+
+    for attempt, cur_cfg in enumerate([cfg, _get_fallback_config()]):  # primary, fallback
+        if cur_cfg is None:
+            continue
+        try:
+            t0 = time.monotonic()
+            result = _call_openai_compatible(cur_cfg, msgs, temperature)
+            dt = (time.monotonic() - start) * 1000
+            t_first = (time.monotonic() - t0) * 1000
+            logger.info("llm ok provider=%s model=%s temp=%s total_ms=%.0f ttfb_ms=%.0f", cur_cfg["provider"], cur_cfg["model"], temperature, dt, t_first)
+            if not result:
+                raise RuntimeError("empty llm response")
+            return result
+        except Exception as e:
+            last_err = e
+            dt = (time.monotonic() - start) * 1000
+            logger.warning("llm fail provider=%s model=%s attempt=%s ms=%.0f err=%s", cur_cfg["provider"], cur_cfg["model"], attempt, dt, e)
+            # если это primary и есть fallback — пробуем дальше
+            if attempt == 0 and _get_fallback_config() is not None:
+                continue
+            raise
+
+    # сюда не должны попасть
+    raise RuntimeError(f"LLM all providers failed: {last_err}")
+
+# Для тестов: сброс кэша
+def _reset_cache():
+    global _system_prompt_cache
+    _system_prompt_cache = None

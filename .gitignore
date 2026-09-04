@@ -1,0 +1,8 @@
+# --- Abramenko Studio demo ---
+__pycache__/
+.venv/
+.env
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/

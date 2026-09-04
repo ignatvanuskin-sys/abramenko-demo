@@ -16,12 +16,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+class _UserIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        if not hasattr(record, "user_id"):
+            record.user_id = "-"
+        return True
+
 logger = logging.getLogger("abramenko.telegram")
 if not logger.handlers:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s user_id=%(user_id)s %(message)s",
     )
+    # aiogram и другие сторонние логгеры не передают user_id — подставляем дефолт
+    for h in logging.getLogger().handlers:
+        h.addFilter(_UserIdFilter())
+    logging.getLogger().addFilter(_UserIdFilter())
+    # покроем уже созданные логгеры aiogram
+    for name in ("aiogram", "aiogram.dispatcher", "aiogram.event"):
+        logging.getLogger(name).addFilter(_UserIdFilter())
 
 PHONE_RE = re.compile(r"(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}")
 

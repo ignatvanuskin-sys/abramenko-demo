@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Abramenko Studio — WhatsApp демо записи</title>
+<meta name="description" content="Попробуйте нашего WhatsApp-бота для записи в Abramenko Studio прямо на сайте">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="bg"></div>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="logo">ABRAMENKO<span>STUDIO</span></div>
+    <div class="nav">Петропавловск • 2 филиала • 4.8 ★</div>
+  </div>
+</header>
+
+<main class="hero">
+  <div class="hero-text">
+    <div class="badge">✦ Премия 2ГИС — Лучший салон 2025</div>
+    <h1>Запишитесь<br><em>как в WhatsApp</em></h1>
+    <p class="subtitle">Попробуйте нашего бота прямо здесь. Он задаст 4 вопроса и передаст заявку администратору — без звонков и ожидания.</p>
+    <ul class="features">
+      <li><span class="dot"></span> Отвечает за секунды • один вопрос за раз</li>
+      <li><span class="dot"></span> Помнит цену, филиалы и услуги из 2ГИС</li>
+      <li><span class="dot"></span> В конце — заявка улетает в Telegram админа</li>
+    </ul>
+    <div class="trust">
+      <div class="avatars"><i></i><i></i><i></i></div>
+      <span>191 оценка • 4.8 на Жамбыла • 170 на Букетова</span>
+    </div>
+    <div class="mini-hint">На телефоне чат откроется на весь экран →</div>
+  </div>
+
+  <div class="phone-wrap">
+    <div class="phone" id="phone">
+      <div class="phone-notch"><span></span></div>
+      <div class="phone-frame"></div>
+
+      <!-- WhatsApp header -->
+      <div class="wa-header">
+        <div class="wa-avatar">A</div>
+        <div class="wa-info">
+          <div class="wa-name">Abramenko Studio</div>
+          <div class="wa-status" id="wa-status">online • отвечает быстро</div>
+        </div>
+        <div class="wa-actions">⋮</div>
+      </div>
+
+      <!-- Chat -->
+      <div class="chat" id="chat"></div>
+
+      <!-- typing -->
+      <div class="typing" id="typing" hidden>
+        <span></span><span></span><span></span>
+      </div>
+
+      <!-- quick replies -->
+      <div class="quick" id="quick"></div>
+
+      <!-- success -->
+      <div class="success" id="success" hidden>
+        <div class="success-icon">✓</div>
+        <div class="success-title">Заявка отправлена</div>
+        <div class="success-text">Передали администратору. Скоро свяжутся для подтверждения.</div>
+        <button class="btn-reset" id="btn-reset">Начать новый диалог</button>
+      </div>
+
+      <!-- input -->
+      <div class="input-bar">
+        <input id="input" type="text" placeholder="Напишите сообщение..." autocomplete="off" maxlength="500">
+        <button id="send" aria-label="Отправить">➤</button>
+      </div>
+    </div>
+    <div class="phone-shadow"></div>
+    <div class="phone-caption">Демо работает на настоящей логике бота — <b>app/bot_logic.py</b></div>
+  </div>
+</main>
+
+<footer class="footer">Abramenko Studio • Жамбыла 127 (Madame) • Букетова 61 • WhatsApp +7 707 486 54 37</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

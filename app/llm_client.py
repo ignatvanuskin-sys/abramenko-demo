@@ -120,6 +120,17 @@ def _get_fallback_config() -> Optional[Dict[str, str]]:
 def llm_available() -> bool:
     return _get_config() is not None
 
+def _get_short_prompt() -> str:
+    # сжатый промпт для Groq free tier (TPM 8k) — ~900 токенов вместо 5000
+    return (
+        "Ты — администратор Abramenko Studio, Петропавловск. Отвечай коротко, 1-2 строки, один вопрос за раз. Не выдумывай.\n"
+        "Сеть: 2 точки. Букетова 61 (Abramenko Studio, Евразийский рынок 200м, 4.6 170, тел 3) — брови/лазер. "
+        "Жамбыла 127 (Madame, Конституции 80м, 4.8 191, премия 2ГИС 2025, парковка 7) — свадебные/муж.маникюр.\n"
+        "Слоган: Окрашивание и стрижки любой сложности. Оплата: карта/наличные/перевод. Wi-Fi есть.\n"
+        "Цены: AirTouch/балаяж/dim-out/мелирование 25-80k, total blond 25-70k, коррекция 15-28k, один тон от 8k, выход из темного 35-130k, яркое 18-45k, коррекция сложных 30-50k, контуринг 18-28k, жен стрижка 4-7k (Madame от 5000), муж 2.5-4k (от 3500). Остальное — уточню у администратора.\n"
+        "Правила: Сначала ответь, потом один вопрос. Не называть окна, не подтверждать запись, не обещать результат, не давать медсоветов. При срочности — взять имя/телефон. Если факта нет — \"Уточню у администратора\".\n"
+    )
+
 def _call_openai_compatible(cfg: Dict[str, str], messages: List[Dict[str, str]], temperature: float) -> str:
     from openai import OpenAI
     client = OpenAI(
@@ -129,9 +140,9 @@ def _call_openai_compatible(cfg: Dict[str, str], messages: List[Dict[str, str]],
         max_retries=0,
     )
     system = _get_system_prompt()
-    # оптимизация скорости: короткий system — берём первые 4000 символов + правила
-    # полный промпт уже содержит филиалы/цены, но для WhatsApp важно уложиться в latency
-    # оставляем как есть, провайдер кэширует system
+    # для Groq free tier TPM 8k — полный промпт 5k токенов превышает лимит, используем сжатый
+    if cfg["provider"] == "groq" and len(system) > 4000:
+        system = _get_short_prompt()
     resp = client.chat.completions.create(
         model=cfg["model"],
         messages=[{"role": "system", "content": system}, *messages],
@@ -157,23 +168,31 @@ def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     for attempt, cur_cfg in enumerate([cfg, _get_fallback_config()]):  # primary, fallback
         if cur_cfg is None:
             continue
-        try:
-            t0 = time.monotonic()
-            result = _call_openai_compatible(cur_cfg, msgs, temperature)
-            dt = (time.monotonic() - start) * 1000
-            t_first = (time.monotonic() - t0) * 1000
-            logger.info("llm ok provider=%s model=%s temp=%s total_ms=%.0f ttfb_ms=%.0f", cur_cfg["provider"], cur_cfg["model"], temperature, dt, t_first)
-            if not result:
-                raise RuntimeError("empty llm response")
-            return result
-        except Exception as e:
-            last_err = e
-            dt = (time.monotonic() - start) * 1000
-            logger.warning("llm fail provider=%s model=%s attempt=%s ms=%.0f err=%s", cur_cfg["provider"], cur_cfg["model"], attempt, dt, e)
-            # если это primary и есть fallback — пробуем дальше
-            if attempt == 0 and _get_fallback_config() is not None:
-                continue
-            raise
+        # 429 retry один раз
+        for retry in range(2):
+            try:
+                t0 = time.monotonic()
+                result = _call_openai_compatible(cur_cfg, msgs, temperature)
+                dt = (time.monotonic() - start) * 1000
+                t_first = (time.monotonic() - t0) * 1000
+                logger.info("llm ok provider=%s model=%s temp=%s total_ms=%.0f ttfb_ms=%.0f", cur_cfg["provider"], cur_cfg["model"], temperature, dt, t_first)
+                if not result:
+                    raise RuntimeError("empty llm response")
+                return result
+            except Exception as e:
+                last_err = e
+                is_rate = "rate_limit" in str(e).lower() or "429" in str(e)
+                dt = (time.monotonic() - start) * 1000
+                logger.warning("llm fail provider=%s model=%s attempt=%s retry=%s ms=%.0f err=%s", cur_cfg["provider"], cur_cfg["model"], attempt, retry, dt, e)
+                if is_rate and retry == 0:
+                    time.sleep(4.5)
+                    continue
+                break
+        # если это primary и есть fallback — пробуем дальше
+        if attempt == 0 and _get_fallback_config() is not None:
+            continue
+        if last_err:
+            raise last_err
 
     # сюда не должны попасть
     raise RuntimeError(f"LLM all providers failed: {last_err}")

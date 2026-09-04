@@ -63,10 +63,13 @@ def _extra(user_id: int, username: Optional[str] = None) -> dict:
 async def main() -> None:
     token = get_token()
     if not token:
-        # Понятная ошибка без traceback — требуется ТЗ п.8
+        # Понятная ошибка без traceback — требуется ТЗ п.8/12.
+        # В production засыпаем, чтобы не спамить перезапусками — Railway покажет CRASHED до настройки секретов.
         msg = "TELEGRAM_BOT_TOKEN is not configured"
         print(msg, file=sys.stderr)
         logger.error(msg, extra={"user_id": "-"})
+        # Пауза уменьшает restart-шторм (Railway restartPolicy ON_FAILURE)
+        await asyncio.sleep(15)
         sys.exit(1)
 
     # Ленивый импорт — позволяет импортировать модуль в тестах без aiogram

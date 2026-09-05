@@ -1,4 +1,4 @@
-# Abramenko Studio — ИИ-администратор: от А до Я
+# Abramenko Studio — ИИ-администратор: вся схема от А до Я
 
 > Один `bot_logic` — три транспорта: **Web Demo**, **Telegram**, **WhatsApp (Meta Cloud API)**. Проект для демонстрации клиентам, как ИИ-администратор забирает рутину у живого админа.
 
@@ -65,7 +65,7 @@ WhatsApp ──► Meta Webhook ──┼──┴──► wa_id / session_id /
 ```
 
 - `bot_logic.reply(state, text)` — единственная бизнес-логика, принимает `str` и мутирует `DialogState`, возвращает `str`. Не знает про HTTP/Telegram/WhatsApp.
-- `session_store` — `InMemorySessionStore` per `wa_id`/`user_id`/`UUID`, интерфейс `get/reset` → легко заменить на Redis/Postgres.
+- `session_store` — `InMemorySessionStore` per `user_id`/`UUID`, интерфейс `get/reset` → легко заменить на Redis/Postgres.
 - `llm_client` — provider abstraction `LLM_PROVIDER=groq` `LLM_MODEL=openai/gpt-oss-120b` (1000 tok/s, 0.71s TTFT, $0.15/$0.60) + fallback `openai/gpt-4o-mini`, `temperature 0.2`, `max 180`, `timeout 5s`, 6 сообщений контекст, short prompt для Groq TPM 8k, `classify_on_topic` для off_topic. Без ключа — deterministic-only.
 - `whatsapp.py` — тонкий транспорт: `GET /webhook/whatsapp` (hub.mode/verify_token/challenge), `POST /webhook/whatsapp` (HMAC `X-Hub-Signature-256` fail-closed, parse `entry.changes.value.messages[].from/id/text.body`, dedup по `message_id`, `BackgroundTasks` → 200 ACK → `reply()` → Meta Send `POST https://graph.facebook.com/{v}/ {PHONE_ID}/messages` + `notify_admin`).
 - `web_api.py` — `POST /api/chat`/`/api/reset`/`GET /api/health` + static `web/`, тоже вызывает `reply`.
@@ -126,7 +126,7 @@ Groq `openai/gpt-oss-120b` primary (выбран после сравнения G
 
 ## 10. Тесты
 
-`pytest -q` → `122 passed` (было 101): `test_telegram` 15, `test_admin` 9, `test_web` 13, `test_branches_llm` 23, `test_llm_whatsapp` 15, `test_off_topic` 17, `test_training_fix` 9, `test_whatsapp_transport` 21. Плюс `beauty-booking-bot` 7 (slots, race `слот уже занят`, hardening).
+`pytest -q` → `157 passed`: `test_telegram` 15, `test_admin` 9, `test_web` 13, `test_branches_llm` 23, `test_llm_whatsapp` 15, `test_off_topic` 17, `test_training_fix` 9, `test_whatsapp_transport` 21, `test_classification` 7, `test_premium` 6, `test_production` 13, `test_booking_real` 4, `test_logic` 5. Плюс `beauty-booking-bot` 11 (slots, race `слот уже занят`, hardening, premium).
 
 ---
 
@@ -159,6 +159,41 @@ pytest -q
 
 ## 14. Статус
 
-`Web Demo: READY`, `Backend bot_logic: READY`, `Real WhatsApp transport: PASS` (122/122), `Real booking slots: NOT IMPLEMENTED` (архитектура готова в `beauty-booking-bot`), `Telegram admin: READY`.
+`Web Demo: READY`, `Backend bot_logic: READY`, `Real WhatsApp transport: PASS` (157/157), `Real booking slots: MERGED (demo, за флагом `DEMO_BOOKING`)`, `Telegram admin: READY`, `Premium emoji: READY`.
 
 Следующий шаг после аудита — `Meta WhatsApp Cloud API` к уже готовому `reply()`.
+
+---
+
+## 15. Telegram Premium-эмодзи (таблица владельца)
+
+В боте `@manager_kid_bot` используются **только** ID из таблицы владельца, ничего не выдумано. Маппинг живет в `app/tg_premium.py`, применяется **только на транспортном слое Telegram** (`main_telegram` + `notify_admin(premium=True)` из всех трёх транспортов) — `bot_logic`, web-демо и WhatsApp видят обычный текст без tg-тегов.
+
+| Эмодзи | Premium ID | Где используется |
+|---|---|---|
+| 🙂 / 😊 | `5870764288364252592` | улыбки в ответах бота |
+| 🔔 | `6039486778597970865` | заголовок заявки админу |
+| 📍 | `6042011682497106307` | филиалы в ответах + иконки кнопок филиалов |
+| 👤 | `5870994129244131212` | имя в заявке + кнопка «Поделиться контактом» |
+| ✅ | `5870633910337015697` | подтверждения (сброс диалога) |
+| ❌ | `5870657884844462243` | отказы/ошибки |
+| 📅 | `5890937706803894250` | иконки кнопок времени |
+| ⏰ | `5983150113483134607` | предупреждение о флуде |
+| ℹ | `6028435952299413210` | инфо-тексты |
+| 🎉 | `6041731551845159060` | поздравления |
+| 📊 | `5870930636742595124` | статистика |
+| 🖋 | `5870676941614354370` | правки/заметки |
+| ✍ | `5870753782874246579` | написание |
+| 🖌 | `6050679691004612757` | кнопка «Окрашивание» |
+
+Обычных эмодзи, которых нет в таблице (💇📞👋🗓👨‍🎨), в Telegram-выходе нет — `premium()` их вычищает. ★/☆ оставлены как текстовые символы рейтинга.
+
+**Кнопки:** в тексте кнопок обычных эмодзи нет вообще; иконки только через `icon_custom_emoji_id` (ReplyKeyboard и Inline поддерживают, проверено на `aiogram 3.31.0`):
+- филиалы → 📍 `6042011682497106307`
+- время → 📅 `5890937706803894250`
+- контакт → 👤 `5870994129244131212`
+- окрашивание → 🖌 `6050679691004612757`
+
+**Инлайн-кнопки:** в проекте их нет (бот работает на ReplyKeyboard) — правило зафиксировано: если появятся, только `icon_custom_emoji_id`, без обычных эмодзи в тексте.
+
+**Проверка:** `tests/test_premium.py` — 6 тестов (маппинг, вычистка, отсутствие tg-тегов в `bot_logic`, валидность иконок кнопок, флаг `premium` в `notify_admin`, `premium=True` во всех трёх транспортах). Всего `157 passed`, поллинг `Connection established`.

@@ -11,8 +11,12 @@ def _branch_tz(branch) -> ZoneInfo:
     return ZoneInfo(branch.timezone or "UTC")
 
 def _get_working_interval(db: Session, master_id: int, day: date, tz: ZoneInfo):
-    # исключение
-    exc = db.execute(select(ScheduleException).where(ScheduleException.master_id==master_id, ScheduleException.date==day)).scalar_one_or_none()
+    # исключения — таблица может отсутствовать в свежей демо-БД
+    try:
+        exc = db.execute(select(ScheduleException).where(ScheduleException.master_id==master_id, ScheduleException.date==day)).scalar_one_or_none()
+    except Exception:
+        db.rollback()
+        exc = None
     if exc:
         if exc.is_day_off:
             return None

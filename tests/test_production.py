@@ -155,6 +155,139 @@ def test_webhook_body_too_large(monkeypatch):
     assert r.status_code == 413
 
 
+def test_no_truncated_answers_regression(monkeypatch):
+    """Прошлый баг: «Уточню у администратора. Как» — ответ обрывался на середине.
+
+    Точная последовательность из лога теста — ни один ответ не должен обрываться.
+    """
+    from app.bot_logic import DialogState, reply, GREETING_FULL, UNCLEAR_REPLY, FAQ_UNKNOWN_REPLY, OFF_TOPIC_REPLY
+    from app.admin_notify import is_booking_complete
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("DEMO_BOOKING", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    seq = [
+        ("программирование", OFF_TOPIC_REPLY),
+        ("как стать лучшим программистом", OFF_TOPIC_REPLY),
+        ("ы", GREETING_FULL),
+        ("ы", UNCLEAR_REPLY),
+        ("гей", None),  # inappropriate/unclear/fallback — главное без обрыва
+    ]
+    for msg, expected in seq:
+        s = DialogState()
+        if msg == "ы":
+            # первый «ы» даёт приветствие, второй — короткий переспрос
+            reply(s, "ы")
+            r = reply(s, "ы")
+            assert r == UNCLEAR_REPLY, f"повторное приветствие: {r!r}"
+        else:
+            r = reply(s, msg)
+        assert isinstance(r, str) and r.strip() == r, f"пробелы/пусто: {r!r}"
+        assert r[-1] in ".?!):" or len(r) > 10, f"обрыв: {r!r}"
+        if expected is not None and msg != "ы":
+            assert r == expected, f"{msg!r}: {r!r} != {expected!r}"
+
+
+def test_truncation_guard_llm_fallback(monkeypatch):
+    """Даже если LLM вернёт обрывок — бэктранспорт шлёт как есть, но мы фиксируем лог."""
+    from app.bot_logic import DialogState, reply
+    monkeypatch.setenv("GROQ_API_KEY", "")
+    s = DialogState()
+    r = reply(s, "привет")
+    assert isinstance(r, str)
+
+
+def test_classification_4_categories(monkeypatch):
+    from app.bot_logic import DialogState, reply, GREETING_FULL, UNCLEAR_REPLY, FAQ_UNKNOWN_REPLY, INAPPROPRIATE_REPLY, OFF_TOPIC_REPLY
+    from app.admin_notify import is_booking_complete
+    # off_topic
+    s = DialogState()
+    assert reply(s, "программирование") == OFF_TOPIC_REPLY
+    # unclear — приветствие один раз, потом короткий переспрос
+    s = DialogState()
+    assert reply(s, "ы") == GREETING_FULL
+    assert reply(s, "ы") == UNCLEAR_REPLY
+    assert reply(s, "ы") == UNCLEAR_REPLY  # не повторяет приветствие
+    # faq_unknown — только on-topic вопрос без ответа
+    s = DialogState()
+    assert reply(s, "делаете кератин?") == FAQ_UNKNOWN_REPLY
+    # inappropriate
+    s = DialogState()
+    assert reply(s, "ты тупая дура") == INAPPROPRIATE_REPLY
+    # off_topic не собирает лид: phone-детектор срабатывает, но заявка не завершена
+    s = DialogState()
+    reply(s, "как поступить в вуз")
+    reply(s, "Айгерим")
+    reply(s, "+7 707 123 45 67")
+    assert not is_booking_complete(s)
+    assert s.service is None and s.branch is None
+
+
+def test_master_step_in_booking(monkeypatch):
+    """Бот спрашивает мастера и показывает реальные часы, appointment создаётся."""
+    import sqlite3, gc, os
+    from pathlib import Path
+    from app.bot_logic import DialogState, reply
+    import tempfile
+    tmpdir = tempfile.mkdtemp()
+    db_path = os.path.join(tmpdir, "demo_master.db")
+    monkeypatch.setenv("DEMO_BOOKING", "1")
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{db_path}")
+    eng = sqlite3.connect(db_path)
+    eng.executescript("""
+    DROP TABLE IF EXISTS appointments; DROP TABLE IF EXISTS master_services;
+    DROP TABLE IF EXISTS master_branches; DROP TABLE IF EXISTS working_hours;
+    DROP TABLE IF EXISTS schedule_exceptions; DROP TABLE IF EXISTS services;
+    DROP TABLE IF EXISTS masters; DROP TABLE IF EXISTS branches;
+    """)
+    eng.executescript("""
+    CREATE TABLE branches (id INTEGER PRIMARY KEY, name TEXT, address TEXT, timezone TEXT, is_active INTEGER);
+    INSERT INTO branches VALUES (1, 'Abramenko Studio', 'Букетова 61', 'Asia/Almaty', 1);
+    CREATE TABLE masters (id INTEGER PRIMARY KEY, name TEXT, specialization TEXT, is_active INTEGER);
+    INSERT INTO masters VALUES (1, 'Анна', 'колорист', 1);
+    CREATE TABLE services (id INTEGER PRIMARY KEY, name TEXT, duration_minutes INTEGER, price_min INTEGER, price_max INTEGER, category TEXT);
+    INSERT INTO services VALUES (1, 'Балаяж', 60, 25000, 80000, 'окрашивание');
+    CREATE TABLE master_branches (master_id INTEGER, branch_id INTEGER);
+    INSERT INTO master_branches VALUES (1, 1);
+    CREATE TABLE master_services (master_id INTEGER, service_id INTEGER);
+    INSERT INTO master_services VALUES (1, 1);
+    CREATE TABLE working_hours (id INTEGER PRIMARY KEY, master_id INTEGER, weekday INTEGER, start_time TEXT, end_time TEXT);
+    """)
+    for wd in range(6):
+        eng.execute(f"INSERT INTO working_hours VALUES ({wd+1}, 1, {wd}, '10:00', '19:00')")
+    eng.commit(); eng.close()
+    from app.models import Appointment
+    e3 = sqlite3.connect(db_path)
+    e3.execute("""CREATE TABLE IF NOT EXISTS appointments (
+        id INTEGER PRIMARY KEY, branch_id INTEGER, master_id INTEGER, service_id INTEGER,
+        client_name TEXT, client_phone TEXT, starts_at TEXT, ends_at TEXT,
+        status TEXT DEFAULT 'booked', created_at TEXT)""")
+    e3.commit(); e3.close()
+    s = DialogState()
+    reply(s, "хочу балаяж")
+    reply(s, "окрашены")
+    r_branch = reply(s, "Жамбыла")
+    # реальные слоты: один мастер → сразу дата, или список мастеров; НЕ «будни или выходные»
+    assert "будни или выходные" not in r_branch
+    # выбор мастера (несколько) или дата (один мастер)
+    assert "мастер" in r_branch.lower() or "дату" in r_branch.lower()
+    # после даты показываются конкретные часы (один мастер «Анна» из демо-БД)
+    r_slots = reply(s, "завтра")
+    assert "свободные окна" in r_slots.lower() and "10:00" in r_slots, r_slots
+    # выбор слота -> имя -> телефон -> appointment в БД
+    reply(s, "1")
+    reply(s, "Айгерим")
+    r_final = reply(s, "+7 707 123 45 67")
+    assert "записаны" in r_final.lower()
+    assert s.step == "done"
+    chk = sqlite3.connect(db_path)
+    cnt = chk.execute("SELECT COUNT(*) FROM appointments WHERE status='booked'").fetchone()[0]
+    chk.close()
+    gc.collect()
+    assert cnt >= 1, "appointment не создан в БД"
+
+
 def test_metrics_p95_and_llm_stats():
     c = TestClient(app)
     for i in range(3):

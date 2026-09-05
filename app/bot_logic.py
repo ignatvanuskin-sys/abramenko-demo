@@ -9,8 +9,11 @@
 3. LLM fallback (только если FAQ и intent is None и не в booking flow)
 4. Безопасный fallback
 """
+import logging
 import re
 from .config import BRANCHES, PRICES, SALON, UNKNOWN_ANSWER
+
+logger = logging.getLogger("abramenko.bot_logic")
 
 PHONE_RE = re.compile(r"(?:\+7|8)[\s\-]?\(?\d{3}\)?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}")
 NAME_RE = re.compile(r"(?:я\s+([А-ЯЁ][а-яё]{2,})|меня\s+зовут\s+([А-ЯЁ][а-яё]{2,})|зовут\s+([А-ЯЁ][а-яё]{2,}))")
@@ -195,7 +198,6 @@ def _ask_master(state) -> str:
     # DEMO DATA — заменить на реальное расписание перед продакшеном
     try:
         import os
-        from datetime import date, timedelta
         from sqlalchemy import create_engine
         from sqlalchemy.orm import sessionmaker
         from .models import Branch, Master, Service
@@ -208,7 +210,7 @@ def _ask_master(state) -> str:
         # найти branch_id по имени
         branch_id = 1
         for b in db.query(Branch).all():
-            if state.branch and b.name in state.branch or b.address in (state.branch or ""):
+            if state.branch and (b.name in state.branch or b.address in (state.branch or "")):
                 branch_id = b.id
                 state.branch_id = b.id
                 break
@@ -239,6 +241,7 @@ def _ask_master(state) -> str:
         # несколько мастеров — спросить
         opts = " / ".join([m["name"] for m in masters[:3]])
         state.slots = []  # сброс
+        state.step = "await_master"
         return f"Кто удобнее: {opts} или «неважно, кто из мастеров»? Напишите имя мастера."
     except Exception:
         state.step = "await_date"
@@ -272,6 +275,11 @@ def _show_slots(state) -> str:
         engine = create_engine(db_url)
         Session = sessionmaker(bind=engine)
         db = Session()
+        # schedule_exceptions может не существовать в свежей демо-БД — не падаем
+        try:
+            db.query(ScheduleException).all()
+        except Exception:
+            db.rollback()
         b_id = getattr(state, "branch_id", None) or 1
         s_id = getattr(state, "service_id", None) or 1
         m_id = getattr(state, "master_id", None)
@@ -296,8 +304,10 @@ def _show_slots(state) -> str:
             return "К сожалению, свободных окон на ближайшие 7 дней нет. Напишите другую дату или филиал."
         # сохраняем как ISO
         state.slots = [s.isoformat() for s in slots[:3]]
-        return f"Свободные окна:\n{_format_slots(state.slots)}\nНапишите 1, 2 или 3 чтобы выбрать."
+        who = f"У мастера {state.master_name} " if getattr(state, "master_name", None) else ""
+        return f"{who}свободные окна:\n{_format_slots(state.slots)}\nНапишите 1, 2 или 3 чтобы выбрать."
     except Exception as e:
+        logger.warning("show_slots failed: %s", e)
         return "Не удалось загрузить слоты. Напишите желаемую дату (например, «завтра»)."
 
 
@@ -500,6 +510,53 @@ def reply(state: DialogState, user_text: str) -> str:
     m = PHONE_RE.search(text)
     if m and not state.phone:
         state.phone = m.group(0)
+        # реальные слоты — создаём запись транзакционно до любого ответа
+        if _use_real_booking() and state.intent == "booking" and state.selected_slot:
+            try:
+                import os
+                from sqlalchemy import create_engine
+                from sqlalchemy.orm import sessionmaker
+                from dateutil.parser import isoparse
+                from datetime import timezone
+                db_url = os.getenv("DATABASE_URL")
+                engine = create_engine(db_url)
+                Session = sessionmaker(bind=engine)
+                db = Session()
+                b_id = getattr(state, "branch_id", 1) or 1
+                s_id = getattr(state, "service_id", 1) or 1
+                m_id = getattr(state, "master_id", None)
+                if not m_id:
+                    from .booking_tools import get_masters
+                    masters = get_masters(db, b_id, s_id)
+                    if masters:
+                        m_id = masters[0]["id"]
+                        state.master_id = m_id
+                starts_at = isoparse(state.selected_slot)
+                if starts_at.tzinfo is None:
+                    starts_at = starts_at.replace(tzinfo=timezone.utc)
+                from .booking import create_booking as _create
+                appt = _create(db, b_id, m_id, s_id, state.name or "Клиент", state.phone, starts_at)
+                db.commit()
+                from zoneinfo import ZoneInfo
+                local = appt.starts_at.astimezone(ZoneInfo("Asia/Almaty")) if appt.starts_at.tzinfo else appt.starts_at
+                state.step = "done"
+                name = state.name or "Клиент"
+                return f"Вы записаны, {name}! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Ждём вас!".strip()
+            except ValueError as e:
+                if "занят" in str(e):
+                    state.selected_slot = None
+                    state.slots = []
+                    state.step = "await_slot"
+                    return f"Извините, это время уже заняли, пока вы выбирали. {_show_slots(state)}"
+                logger.exception("booking create failed: %s", e)
+                state.step = "done"
+                name = state.name or "Клиент"
+                return f"Принял, {name}. {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
+            except Exception as e:
+                logger.exception("booking create crashed: %s", e)
+                state.step = "done"
+                name = state.name or "Клиент"
+                return f"Принял, {name}. {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
         if state.name and state.intent:
             closing = CLOSINGS.get(state.intent, CLOSINGS["booking"])
             state.step = "done"
@@ -795,7 +852,7 @@ def reply(state: DialogState, user_text: str) -> str:
         if "неважно" in sel or "любой" in sel:
             # оставляем master_id как None — выберем первого доступного при показе слотов
             pass
-        else:
+        elif state.master_id is None:
             # пробуем найти мастера по имени
             try:
                 import os
@@ -815,7 +872,17 @@ def reply(state: DialogState, user_text: str) -> str:
                     db.close()
             except Exception:
                 pass
+            if state.master_id is None and not is_training_relevant(sel):
+                # не распознали имя мастера и это не услуга — переспросим вежливо
+                return "Напишите имя мастера (например, «Анна») или «неважно, кто из мастеров»."
         # показываем слоты
+        state.step = "await_slot"
+        return _show_slots(state)
+
+    # 5.1b Дата (когда мастер один / слоты ещё не показаны)
+    if state.step == "await_date":
+        state.time_pref = text
+        # показываем реальные слоты
         state.step = "await_slot"
         return _show_slots(state)
 

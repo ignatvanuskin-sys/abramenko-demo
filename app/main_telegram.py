@@ -94,6 +94,7 @@ async def main() -> None:
     from .bot_logic import DialogState, reply
     from .keyboards import keyboard_for_step, kb_remove
     from .session_store import InMemorySessionStore
+    from .tg_premium import premium
 
     store = InMemorySessionStore()
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
@@ -140,13 +141,13 @@ async def main() -> None:
             store.reset(uid)
             store.get(uid).greeted = True
             await msg.answer(
-                "Диалог сброшен. Что вас интересует — запись, модель, вакансия или обучение?",
+                premium("Диалог сброшен ✅ Что вас интересует — запись, модель, вакансия или обучение?"),
                 reply_markup=keyboard_for_step("start"),
             )
         except Exception as e:
             logger.exception("on_cancel failed: %s", e, extra={"user_id": uid})
             try:
-                await msg.answer(FALLBACK_ERROR_TEXT, reply_markup=kb_remove())
+                await msg.answer(premium(FALLBACK_ERROR_TEXT), reply_markup=kb_remove())
             except Exception:
                 pass
 
@@ -154,8 +155,10 @@ async def main() -> None:
     async def on_help(msg: Message) -> None:
         uid = msg.from_user.id if msg.from_user else 0
         await msg.answer(
-            "Напишите, что вас интересует: запись, модель, вакансия или обучение. "
-            "Я задам пару уточняющих вопросов и передам администратору.",
+            premium(
+                "Напишите, что вас интересует: запись, модель, вакансия или обучение. "
+                "Я задам пару уточняющих вопросов и передам администратору."
+            ),
             reply_markup=kb_remove(),
         )
         logger.info("cmd /help", extra={"user_id": uid})
@@ -175,10 +178,10 @@ async def main() -> None:
             extra={"user_id": uid},
         )
         try:
-            answer = reply(state, text)
+            answer = premium(reply(state, text))
         except Exception as e:
             logger.exception("reply(contact) failed: %s", e, extra={"user_id": uid})
-            await msg.answer(FALLBACK_ERROR_TEXT, reply_markup=kb_remove())
+            await msg.answer(premium(FALLBACK_ERROR_TEXT), reply_markup=kb_remove())
             return
         kb = keyboard_for_step(state.step)
         # После done убираем клавиатуру
@@ -191,7 +194,7 @@ async def main() -> None:
         await msg.answer(answer, reply_markup=kb)
         # Админ-уведомление — одно на заявку, не ломает клиентский флоу
         try:
-            await notify_admin(bot, state, uid, uname)
+            await notify_admin(bot, state, uid, uname, premium=True)
         except Exception as e:
             logger.exception("admin notify wrapper failed: %s", e, extra={"user_id": uid})
 
@@ -203,20 +206,20 @@ async def main() -> None:
         # Пустое сообщение — не падаем
         if not raw.strip():
             logger.warning("empty text", extra={"user_id": uid})
-            await msg.answer("Напишите, пожалуйста, текстом — я подскажу.", reply_markup=kb_remove())
+            await msg.answer(premium("Напишите, пожалуйста, текстом — я подскажу."), reply_markup=kb_remove())
             return
         if not _flood_ok(uid):
             logger.warning("flood limit user_id=%s", uid, extra={"user_id": uid})
-            await msg.answer("Слишком много сообщений. Подождите немного и попробуйте снова.", reply_markup=kb_remove())
+            await msg.answer(premium("Слишком много сообщений ⏰ Подождите немного и попробуйте снова."), reply_markup=kb_remove())
             return
         state: DialogState = store.get(uid)
         log_in = mask_text_for_log(raw)
         logger.info("in text='%s' step=%s intent=%s", log_in, state.step, state.intent, extra={"user_id": uid})
         try:
-            answer = reply(state, raw)
+            answer = premium(reply(state, raw))
         except Exception as e:
             logger.exception("reply failed: %s", e, extra={"user_id": uid})
-            await msg.answer(FALLBACK_ERROR_TEXT, reply_markup=kb_remove())
+            await msg.answer(premium(FALLBACK_ERROR_TEXT), reply_markup=kb_remove())
             return
         kb = keyboard_for_step(state.step)
         if state.step == "done":
@@ -233,12 +236,12 @@ async def main() -> None:
             # Ошибка Telegram API — не падаем
             logger.exception("send failed: %s", e, extra={"user_id": uid})
             try:
-                await msg.answer(FALLBACK_ERROR_TEXT, reply_markup=kb_remove())
+                await msg.answer(premium(FALLBACK_ERROR_TEXT), reply_markup=kb_remove())
             except Exception:
                 pass
         # Админ-уведомление — не по тексту ответа, а по фактическому состоянию
         try:
-            await notify_admin(bot, state, uid, uname)
+            await notify_admin(bot, state, uid, uname, premium=True)
         except Exception as e:
             logger.exception("admin notify wrapper failed: %s", e, extra={"user_id": uid})
 
@@ -248,7 +251,7 @@ async def main() -> None:
         uid = msg.from_user.id if msg.from_user else 0
         logger.warning("unsupported content_type=%s", msg.content_type, extra={"user_id": uid})
         try:
-            await msg.answer("Пришлите, пожалуйста, сообщение текстом.", reply_markup=kb_remove())
+            await msg.answer(premium("Пришлите, пожалуйста, сообщение текстом 🙂"), reply_markup=kb_remove())
         except Exception:
             pass
 

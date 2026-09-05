@@ -3,13 +3,15 @@ from __future__ import annotations
 
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
+from .tg_premium import ICON_BRANCH, ICON_BRUSH, ICON_CONTACT, ICON_TIME
+
 # Один вопрос за сообщение — клавиатуры лишь подсказывают следующий ответ,
 # но не заставляют пользователя жать именно кнопку.
 
 def kb_services() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Окрашивание"), KeyboardButton(text="Стрижка")],
+            [KeyboardButton(text="Окрашивание", icon_custom_emoji_id=ICON_BRUSH), KeyboardButton(text="Стрижка")],
             [KeyboardButton(text="Ногти"), KeyboardButton(text="Другое")],
         ],
         resize_keyboard=True,
@@ -21,9 +23,9 @@ def kb_services() -> ReplyKeyboardMarkup:
 def kb_time() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Будни"), KeyboardButton(text="Выходные")],
-            [KeyboardButton(text="Утром"), KeyboardButton(text="Вечером")],
-            [KeyboardButton(text="Будни утром"), KeyboardButton(text="Выходные вечером")],
+            [KeyboardButton(text="Будни", icon_custom_emoji_id=ICON_TIME), KeyboardButton(text="Выходные", icon_custom_emoji_id=ICON_TIME)],
+            [KeyboardButton(text="Утром", icon_custom_emoji_id=ICON_TIME), KeyboardButton(text="Вечером", icon_custom_emoji_id=ICON_TIME)],
+            [KeyboardButton(text="Будни утром", icon_custom_emoji_id=ICON_TIME), KeyboardButton(text="Выходные вечером", icon_custom_emoji_id=ICON_TIME)],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -34,8 +36,8 @@ def kb_time() -> ReplyKeyboardMarkup:
 def kb_branch() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Букетова, 61")],
-            [KeyboardButton(text="Жамбыла, 127 (Madame)")],
+            [KeyboardButton(text="Букетова, 61", icon_custom_emoji_id=ICON_BRANCH)],
+            [KeyboardButton(text="Жамбыла, 127 (Madame)", icon_custom_emoji_id=ICON_BRANCH)],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,
@@ -46,7 +48,7 @@ def kb_branch() -> ReplyKeyboardMarkup:
 def kb_contact_request() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="Поделиться контактом", request_contact=True)],
+            [KeyboardButton(text="Поделиться контактом", request_contact=True, icon_custom_emoji_id=ICON_CONTACT)],
         ],
         resize_keyboard=True,
         one_time_keyboard=True,

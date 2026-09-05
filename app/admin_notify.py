@@ -97,10 +97,11 @@ def build_admin_message(state, user_id: int, username: Optional[str]) -> str:
     )
 
 
-async def notify_admin(bot, state, user_id: int, username: Optional[str]) -> bool:
+async def notify_admin(bot, state, user_id: int, username: Optional[str], premium: bool = False) -> bool:
     """Отправляет уведомление администратору. Возвращает True если отправлено.
 
     Не кидает исключение наружу — логирует и возвращает False при ошибке.
+    premium=True — заменить эмодзи на Telegram Premium (<tg-emoji>).
     """
     admin_id = get_admin_chat_id()
     if admin_id is None:
@@ -123,6 +124,12 @@ async def notify_admin(bot, state, user_id: int, username: Optional[str]) -> boo
         return False
 
     text = build_admin_message(state, user_id, username)
+    if premium:
+        try:
+            from .tg_premium import premium as _premium
+        except ImportError:  # pragma: no cover
+            from tg_premium import premium as _premium
+        text = _premium(text)
     # Флаг ставим ДО отправки, чтобы повторный вызов в том же состоянии не дублировал
     try:
         setattr(state, "_admin_notified", True)

@@ -151,6 +151,8 @@ def _call_openai_compatible(cfg: Dict[str, str], messages: List[Dict[str, str]],
         top_p=1,
     )
     content = resp.choices[0].message.content
+    # лог полного сырого ответа ДО отправки в транспорт — для диагностики обрывов
+    logger.info("llm raw response len=%d text=%r", len(content or ""), (content or "")[:2000])
     return (content or "").strip()
 
 def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:

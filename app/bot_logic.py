@@ -34,6 +34,54 @@ class DialogState:
         self.step = "start"
         # для vacancy/model/training — портфолио/опыт, чтобы не ломать booking поля
         self.portfolio = None
+        # приветствие отправляется один раз за сессию (для unclear без повторов)
+        self.greeted = False
+
+# Категории нераспознанных: off_topic / unclear / faq_unknown / inappropriate
+OFF_TOPIC_REPLY = "Поняла 😊 Я подскажу только по услугам Abramenko Studio — окрашивание, стрижки, брови, эпиляция и запись. Что вас интересует?"
+UNCLEAR_REPLY = "Не поняла, о чём речь 🙂 Хотите записаться, узнать цену или что-то ещё?"
+FAQ_UNKNOWN_REPLY = "Уточню у администратора, он ответит точно."
+INAPPROPRIATE_REPLY = "Я тут только по вопросам салона 🙂 Подскажу по услугам или запишу — что вам актуально?"
+GREETING_FULL = "Здравствуйте! Abramenko Studio. Что вас интересует — запись, модель, вакансия или обучение?"
+
+INAPPROPRIATE_KEYWORDS = [
+    "дура", "дурак", "тупая", "тупой", "идиот", "дебил", "пошла", "пошел",
+    "секс", "порно", "эротик", "наркотик", "наркот", "убью", "убей",
+    "ненавижу", "сука", "бля", "нах", "хер", "пизд",
+    "игнорируй инструкции", "покажи system prompt", "system prompt",
+    "jailbreak", "dan mode", "обойди правила",
+]
+
+BEAUTY_TOPIC_KEYWORDS = [
+    "кератин", "окрашиван", "стрижк", "завивк", "ламинирован", "ботокс",
+    "пилинг", "массаж", "макияж", "прическ", "укладк", "мелир", "блонд",
+    "балаяж", "airtouch", "хим", "восстановл",
+]
+
+def is_inappropriate(text: str) -> bool:
+    t = text.lower()
+    for kw in INAPPROPRIATE_KEYWORDS:
+        if " " in kw:
+            if kw in t:
+                return True
+        else:
+            # короткие корни ("хер", "нах") — только по границам слов,
+            # иначе "парикмахер" даст ложное срабатывание
+            if re.search(r"\b" + re.escape(kw) + r"\b", t):
+                return True
+    return False
+
+def is_unclear(text: str) -> bool:
+    s = text.strip()
+    if not s:
+        return True
+    cleaned = re.sub(r"\s", "", s)
+    if len(cleaned) <= 1:
+        return True
+    # только символы/эмодзи без букв и цифр
+    if re.fullmatch(r"[^\wа-яё]+", s, re.IGNORECASE):
+        return True
+    return False
 
 
 def _find_price(text: str):
@@ -74,14 +122,15 @@ SALON_KEYWORDS = [
     "колорист", "мастер", "ваканс", "модел", "портфолио", "время", "будни",
     "выходн", "администратор", "контакт", "телефон", "имя", "парков", "отзыв",
     "рейтинг", "премия", "свадеб", "прическ", "прикорнев", "холодн",
+    "кератин", "ламинирован", "укладк", "мелир", "блонд", "airtouch",
 ]
 
 OFF_TOPIC_KEYWORDS = [
     "вуз", "университет", "универ", "поступить", "поступление", "абитуриент",
-    "егэ", " ент", "колледж", "институт", "программирован", " python", "питон",
-    "английск", "математик", "автомобил", "ремонт", "путешеств", "погода",
+    "егэ", " ент", "колледж", "институт", "программ", " python", "питон",
+    "английск", "математик", "автомобил", "машин", "ремонт", "путешеств", "погода",
     "новост", "политик", "президент", "выборы", "крипт", "биткоин", "инвестиц",
-    "акции", "трейдинг", "игра", "гейм", "футбол", "спорт", "школьн",
+    "акции", "трейдинг", "игра", "гейм", "футбол", "спорт", "школьн", "отношен",
 ]
 
 def _is_on_topic_deterministic(text: str) -> bool | None:
@@ -458,9 +507,20 @@ def reply(state: DialogState, user_text: str) -> str:
             state.step = "done"
             return f"Принял, {name}. {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
 
-    # 0.5 off_topic защита — до FAQ и intent, не меняем state и не собираем лид
+    # 0.5 inappropriate — оскорбления/провокации: не уточнять смысл, не повторять слова, без state
+    if is_inappropriate(text):
+        return INAPPROPRIATE_REPLY
+
+    # 0.6 unclear — только на старте без intent (внутри booking короткие "1"/"да" — валидные ответы)
+    if state.step == "start" and state.intent is None and is_unclear(text):
+        if state.greeted:
+            return UNCLEAR_REPLY
+        state.greeted = True
+        return GREETING_FULL
+
+    # 0.7 off_topic защита — до FAQ и intent, не меняем state и не собираем лид
     if is_off_topic(text, state):
-        return "Поняла 😊 Я могу помочь только по вопросам Abramenko Studio: услуги, цены, запись, обучение в сфере красоты, вакансии или модели. Что вас интересует?"
+        return OFF_TOPIC_REPLY
 
     # 1. FAQ — только если это похоже на вопрос, и не перебиваем слоты время/филиал/имя/телефон
     if state.step in ("time", "branch", "await_name", "await_phone", "clarify_hair", "portfolio"):
@@ -499,11 +559,18 @@ def reply(state: DialogState, user_text: str) -> str:
     if state.step == "start":
         intent = detect_intent(text)
         if not intent:
+            # on-topic вопрос без ответа в базе — только здесь "Уточню у администратора"
+            if _looks_like_question(text) and _is_on_topic_deterministic(text) is True:
+                return FAQ_UNKNOWN_REPLY
             # пробуем LLM перед дефолтным приветствием
             llm_ans = _try_llm_fallback(state, text)
             if llm_ans:
                 return llm_ans
-            return "Здравствуйте! Abramenko Studio. Что вас интересует — запись, модель, вакансия или обучение?"
+            # приветствие один раз за сессию, дальше — короткий переспрос
+            if state.greeted:
+                return UNCLEAR_REPLY
+            state.greeted = True
+            return GREETING_FULL
         state.intent = intent
         # training — сразу отсекаем нерелевантное (прямо на старте, если уже есть тема)
         if intent == "training" and not is_training_relevant(text):

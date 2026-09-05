@@ -9,7 +9,7 @@ from app.admin_notify import is_booking_complete
 def test_off_topic_vuz():
     s = DialogState()
     r = reply(s, "как поступить в вуз")
-    assert "могу помочь только по вопросам Abramenko Studio" in r
+    assert "подскажу только по услугам Abramenko Studio" in r
     assert s.intent is None
     assert s.step == "start"
     assert not is_booking_complete(s)
@@ -17,18 +17,18 @@ def test_off_topic_vuz():
 def test_off_topic_university():
     s = DialogState()
     r = reply(s, "как поступить в университет")
-    assert "могу помочь только" in r
+    assert "подскажу только по услугам" in r
     assert s.step == "start"
 
 def test_off_topic_python():
     s = DialogState()
     r = reply(s, "расскажи про Python")
-    assert "могу помочь только" in r
+    assert "подскажу только по услугам" in r
 
 def test_off_topic_english():
     s = DialogState()
     r = reply(s, "как выучить английский")
-    assert "могу помочь только" in r
+    assert "подскажу только по услугам" in r
 
 def test_off_topic_programming_course():
     s = DialogState()
@@ -89,7 +89,7 @@ def test_off_topic_via_llm_mock():
     s = DialogState()
     with patch("app.bot_logic._is_off_topic_llm", return_value=True):
         r = reply(s, "неоднозначный оффтоп без ключевых слов бла бла")
-        assert "могу помочь только" in r
+        assert "подскажу только по услугам" in r
 
 def test_on_topic_via_llm_mock():
     s = DialogState()
@@ -97,7 +97,7 @@ def test_on_topic_via_llm_mock():
         # неоднозначное но LLM говорит on_topic
         r = reply(s, "неоднозначный но про салон бла бла")
         # не должен быть off_topic redirect
-        assert "могу помочь только" not in r
+        assert "подскажу только по услугам" not in r
 
 def test_free_text_still_on_topic():
     for txt in ["подскажите, пожалуйста, как поступить в университет", "можете рассказать про Python", "а сколько стоит обучение на программиста"]:
@@ -105,7 +105,7 @@ def test_free_text_still_on_topic():
         r = reply(s, txt)
         # все эти должны быть off_topic или irrelevant training, но не booking
         assert s.intent is None or s.intent == "training"
-        assert "не проводится" in r.lower() or "могу помочь только" in r.lower() or "уточню" in r.lower()
+        assert "не проводится" in r.lower() or "подскажу только по услугам" in r.lower() or "уточню" in r.lower()
 
 def test_booking_free_text():
     s = DialogState()

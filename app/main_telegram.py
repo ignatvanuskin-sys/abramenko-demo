@@ -108,6 +108,7 @@ async def main() -> None:
         logger.info("cmd /start", extra={"user_id": uid})
         try:
             store.reset(uid)
+            store.get(uid).greeted = True
             kb = keyboard_for_step(store.get(uid).step)
             await msg.answer(WELCOME_TEXT, reply_markup=kb)
             logger.info("sent welcome", extra={"user_id": uid})

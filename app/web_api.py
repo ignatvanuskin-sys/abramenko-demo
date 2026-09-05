@@ -113,6 +113,7 @@ WEB_GREETING = "Здравствуйте! 👋 Я администратор Abr
 def reset(req: ResetRequest):
     sid = (req.session_id or "").strip() or str(uuid.uuid4())
     _reset_state(sid)
+    _WEB_STORE[sid].greeted = True
     return ChatResponse(
         message=WEB_GREETING,
         buttons=["Хочу записаться", "Услуги и цены", "Адреса"],
@@ -135,6 +136,7 @@ async def chat(req: ChatRequest):
     try:
         # старт — красивое приветствие, а не формальный список веток
         if raw.strip() == "" and st.step == "start":
+            st.greeted = True
             return ChatResponse(message=WEB_GREETING, buttons=["Хочу записаться", "Услуги и цены", "Адреса"], done=False, step="start")
         answer = reply(st, raw)
     except Exception as e:

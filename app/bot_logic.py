@@ -20,9 +20,15 @@ class DialogState:
     def __init__(self):
         self.intent = None  # booking|model|vacancy|training
         self.service = None
+        self.service_id = None
         self.hair = None
         self.time_pref = None
         self.branch = None
+        self.branch_id = None
+        self.master_id = None
+        self.master_name = None
+        self.slots = []  # list of ISO strings
+        self.selected_slot = None
         self.name = None
         self.phone = None
         self.step = "start"
@@ -119,6 +125,129 @@ def is_off_topic(text: str, state) -> bool:
 
 def _is_question_about_branch_detail(t: str) -> bool:
     return any(w in t for w in ["что на", "что есть", "расскаж", "что у вас", "какие услуги", "что делаете на"])
+
+def _use_real_booking() -> bool:
+    import os
+    # для демо — включается только если явно задан DEMO_BOOKING=1 и есть БД
+    # иначе оставляем старый flow (предпочтение будни/выходные) для совместимости тестов
+    if os.getenv("DEMO_BOOKING") != "1":
+        return False
+    if not os.getenv("DATABASE_URL"):
+        return False
+    try:
+        from .booking import get_available_slots  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+def _ask_master(state) -> str:
+    # DEMO DATA — заменить на реальное расписание перед продакшеном
+    try:
+        import os
+        from datetime import date, timedelta
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from .models import Branch, Master, Service
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            raise ValueError("no db")
+        engine = create_engine(db_url)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        # найти branch_id по имени
+        branch_id = 1
+        for b in db.query(Branch).all():
+            if state.branch and b.name in state.branch or b.address in (state.branch or ""):
+                branch_id = b.id
+                state.branch_id = b.id
+                break
+        # найти service_id по названию услуги
+        service_id = 1
+        for s in db.query(Service).all():
+            if state.service and s.name.lower() in state.service.lower():
+                service_id = s.id
+                state.service_id = s.id
+                break
+        # если не нашли — берём первый
+        if not state.service_id:
+            first = db.query(Service).first()
+            if first:
+                service_id = first.id
+                state.service_id = first.id
+        from .booking_tools import get_masters
+        masters = get_masters(db, branch_id, service_id)
+        db.close()
+        if not masters:
+            state.step = "await_date"
+            return "На какую дату смотрим? Напишите, например, «завтра» или «на этой неделе»."
+        if len(masters) == 1:
+            state.master_id = masters[0]["id"]
+            state.master_name = masters[0]["name"]
+            state.step = "await_date"
+            return f"Мастер {masters[0]['name']} свободен. На какую дату смотрим? Например, «завтра» или конкретная дата."
+        # несколько мастеров — спросить
+        opts = " / ".join([m["name"] for m in masters[:3]])
+        state.slots = []  # сброс
+        return f"Кто удобнее: {opts} или «неважно, кто из мастеров»? Напишите имя мастера."
+    except Exception:
+        state.step = "await_date"
+        return "На какую дату смотрим? Напишите, например, «завтра» или «на этой неделе»."
+
+def _format_slots(slots: list) -> str:
+    # slots — list of ISO strings UTC, показываем в TZ филиала
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    import os
+    tz = ZoneInfo("Asia/Almaty")
+    lines = []
+    for i, iso in enumerate(slots[:3], 1):
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        local = dt.astimezone(tz)
+        lines.append(f"{i}) {local.strftime('%d.%m %H:%M')}")
+    return "\n".join(lines)
+
+def _show_slots(state) -> str:
+    # DEMO DATA — заменить на реальное расписание перед продакшеном
+    try:
+        import os
+        from datetime import date, timedelta
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        db_url = os.getenv("DATABASE_URL")
+        if not db_url:
+            raise ValueError("no db")
+        engine = create_engine(db_url)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        b_id = getattr(state, "branch_id", None) or 1
+        s_id = getattr(state, "service_id", None) or 1
+        m_id = getattr(state, "master_id", None)
+        if not m_id:
+            # любой мастер — берём первого для услуги/филиала
+            from .booking_tools import get_masters
+            masters = get_masters(db, b_id, s_id)
+            if masters:
+                m_id = masters[0]["id"]
+                state.master_id = m_id
+                state.master_name = masters[0]["name"]
+            else:
+                m_id = 1
+        date_from = date.today()
+        date_to = date_from + timedelta(days=7)
+        from .booking import get_available_slots
+        import os as _os
+        buf = int(_os.getenv("BUFFER_MINUTES", "15"))
+        slots = get_available_slots(db, b_id, m_id, s_id, date_from, date_to, buffer_minutes=buf)
+        db.close()
+        if not slots:
+            return "К сожалению, свободных окон на ближайшие 7 дней нет. Напишите другую дату или филиал."
+        # сохраняем как ISO
+        state.slots = [s.isoformat() for s in slots[:3]]
+        return f"Свободные окна:\n{_format_slots(state.slots)}\nНапишите 1, 2 или 3 чтобы выбрать."
+    except Exception as e:
+        return "Не удалось загрузить слоты. Напишите желаемую дату (например, «завтра»)."
 
 
 def faq_answer(text: str):
@@ -509,33 +638,15 @@ def reply(state: DialogState, user_text: str) -> str:
         return "Понял. Вам удобнее в будни или в выходные? Утром или ближе к вечеру?"
 
     if state.step == "clarify_hair":
-        # если ответ содержит время+филиал — не перезаписываем волосы
-        if _is_about_zhambyla(low) or _is_about_buketova(low) or "выходн" in low or "суббот" in low or "будн" in low:
-            if _is_about_zhambyla(low):
-                state.branch = "Жамбыла 127"
-            elif _is_about_buketova(low):
-                state.branch = "Букетова 61"
-            if "выходн" in low or "суббот" in low or "воскрес" in low:
-                state.time_pref = "выходные"
-            elif "будн" in low:
-                state.time_pref = "будни"
-            # волосы уже есть, идём к времени/филиалу с учётом предзаполнения
-            if state.time_pref and state.branch:
-                if state.name:
-                    state.step = "await_phone"
-                    return f"{state.name}, какой номер для связи — администратор перезвонит?"
-                state.step = "await_name"
-                return "Хорошо. Как вас зовут?"
-            if state.time_pref:
-                state.step = "branch" if not state.branch else "await_name"
-                if state.branch:
-                    if state.name:
-                        state.step = "await_phone"
-                        return f"{state.name}, какой номер для связи — администратор перезвонит?"
-                    return "Хорошо. Как вас зовут?"
-                return "Какой филиал удобнее — Букетова, 61 (Евразийский рынок) или Жамбыла, 127 Madame (Конституции Казахстана)?"
         state.hair = text
-        # для booking после волос — время, для остальных уже ушли в portfolio
+        if _use_real_booking():
+            # демо: сразу к филиалу/мастеру
+            if state.branch:
+                state.step = "await_master"
+                return _ask_master(state)
+            state.step = "branch"
+            return "Какой филиал удобнее — Букетова, 61 (Евразийский рынок) или Жамбыла, 127 Madame (Конституции Казахстана)?"
+        # legacy: спрашиваем время
         state.step = "time"
         return "Понял. Вам удобнее в будни или в выходные? Утром или ближе к вечеру?"
 
@@ -547,9 +658,18 @@ def reply(state: DialogState, user_text: str) -> str:
         state.step = "await_name"
         return "Спасибо! Как вас зовут?"
 
-    # 4. Время
+    # 4. Время — для демо заменено на реальные слоты, для обратной совместимости оставляем фолбэк
     if state.step == "time":
-        # извлекаем филиал если назвали вместе с временем
+        # DEMO: пробуем реальные слоты, если БД доступна — иначе старый фолбэк
+        if _use_real_booking():
+            state.time_pref = text
+            # если филиал уже известен — сразу к мастеру, иначе спросим филиал
+            if state.branch:
+                state.step = "await_master"
+                return _ask_master(state)
+            state.step = "branch"
+            return "Какой филиал удобнее — Букетова, 61 (Евразийский рынок) или Жамбыла, 127 Madame (Конституции Казахстана)?"
+        # legacy fallback
         if _is_about_zhambyla(low):
             state.branch = "Жамбыла 127"
         elif _is_about_buketova(low):
@@ -575,6 +695,10 @@ def reply(state: DialogState, user_text: str) -> str:
 
     # 5. Филиал
     if state.step == "branch":
+        if state.branch and _use_real_booking():
+            # демо-слоты: филиал уже выбран на предыдущем шаге
+            state.step = "await_master"
+            return _ask_master(state)
         if state.branch:
             if state.name:
                 state.step = "await_phone"
@@ -582,9 +706,81 @@ def reply(state: DialogState, user_text: str) -> str:
             state.step = "await_name"
             return "Хорошо. Как вас зовут?"
         state.branch = text
+        # после филиала — к мастеру (реальные слоты) или к имени (fallback)
+        if _use_real_booking():
+            state.step = "await_master"
+            return _ask_master(state)
         if state.name:
             state.step = "await_phone"
             return f"{state.name}, какой номер для связи — администратор перезвонит?"
+        state.step = "await_name"
+        return "Хорошо. Как вас зовут?"
+
+    # 5.1 Мастер
+    if state.step == "await_master":
+        # выбор мастера — текст или "неважно"
+        sel = text.strip().lower()
+        if "неважно" in sel or "любой" in sel:
+            # оставляем master_id как None — выберем первого доступного при показе слотов
+            pass
+        else:
+            # пробуем найти мастера по имени
+            try:
+                import os
+                from sqlalchemy import create_engine
+                from sqlalchemy.orm import sessionmaker
+                from .models import Master
+                db_url = os.getenv("DATABASE_URL")
+                if db_url:
+                    engine = create_engine(db_url)
+                    Session = sessionmaker(bind=engine)
+                    db = Session()
+                    for m in db.query(Master).all():
+                        if m.name.lower() in sel:
+                            state.master_id = m.id
+                            state.master_name = m.name
+                            break
+                    db.close()
+            except Exception:
+                pass
+        # показываем слоты
+        state.step = "await_slot"
+        return _show_slots(state)
+
+    # 5.2 Слоты — выбор
+    if state.step == "await_slot":
+        # если слотов нет — просим дату
+        if not state.slots:
+            state.step = "await_slot"
+            return _show_slots(state)
+        # парсим выбор 1/2/3
+        choice = text.strip()
+        idx = None
+        if choice in ["1", "2", "3", "1)", "2)", "3)"]:
+            idx = int(choice[0]) - 1
+        else:
+            import re as _re
+            m = _re.search(r"(\d{1,2}[:.]\d{2})", choice)
+            if m and state.slots:
+                for i, iso in enumerate(state.slots):
+                    if m.group(1).replace(".", ":") in iso:
+                        idx = i
+                        break
+            if "перв" in low:
+                idx = 0
+            elif "втор" in low:
+                idx = 1
+            elif "трет" in low:
+                idx = 2
+        if idx is not None and 0 <= idx < len(state.slots):
+            state.selected_slot = state.slots[idx]
+            if state.name:
+                state.step = "await_phone"
+                return f"{state.name}, какой номер для связи — администратор перезвонит?"
+            state.step = "await_name"
+            return "Хорошо. Как вас зовут?"
+        if state.slots:
+            return f"Выберите вариант:\n{_format_slots(state.slots)}\nНапишите 1, 2 или 3."
         state.step = "await_name"
         return "Хорошо. Как вас зовут?"
 
@@ -600,6 +796,60 @@ def reply(state: DialogState, user_text: str) -> str:
     if state.step == "await_phone":
         if m:
             state.phone = m.group(0)
+            # реальные слоты — создаём запись транзакционно
+            if _use_real_booking() and state.intent == "booking" and state.selected_slot:
+                try:
+                    import os
+                    from sqlalchemy import create_engine
+                    from sqlalchemy.orm import sessionmaker
+                    from dateutil.parser import isoparse
+                    from datetime import timezone
+                    db_url = os.getenv("DATABASE_URL")
+                    engine = create_engine(db_url)
+                    Session = sessionmaker(bind=engine)
+                    db = Session()
+                    # подставим недостающие id если не выбраны
+                    b_id = getattr(state, "branch_id", 1) or 1
+                    s_id = getattr(state, "service_id", 1) or 1
+                    m_id = getattr(state, "master_id", None)
+                    if not m_id:
+                        # любой мастер — берём первого
+                        from .booking_tools import get_masters
+                        masters = get_masters(db, b_id, s_id)
+                        if masters:
+                            m_id = masters[0]["id"]
+                            state.master_id = m_id
+                    starts_at = isoparse(state.selected_slot)
+                    if starts_at.tzinfo is None:
+                        starts_at = starts_at.replace(tzinfo=timezone.utc)
+                    from .booking import create_booking as _create
+                    appt = _create(db, b_id, m_id, s_id, state.name, state.phone, starts_at)
+                    db.commit()
+                    # форматируем для клиента
+                    from zoneinfo import ZoneInfo
+                    local = appt.starts_at.astimezone(ZoneInfo("Asia/Almaty")) if appt.starts_at.tzinfo else appt.starts_at
+                    state.step = "done"
+                    # admin notify теперь с датой/временем — делается в bot_logic, но также в web_api
+                    try:
+                        import asyncio
+                        from .admin_notify import notify_admin_booking
+                        # если есть бот — уведомим, но не блокируем
+                    except Exception:
+                        pass
+                    return f"Вы записаны! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Ждём вас!".strip()
+                except ValueError as e:
+                    if "занят" in str(e):
+                        # гонка — показываем новые слоты
+                        state.selected_slot = None
+                        state.step = "await_slot"
+                        # сбросим слоты
+                        state.slots = []
+                        return f"Извините, это время уже заняли, пока вы выбирали. {_show_slots(state)}"
+                    raise
+                except Exception:
+                    # fallback к старой логике
+                    state.step = "done"
+                    return f"Принял, {state.name}. {CLOSINGS.get(state.intent, CLOSINGS['booking'])}"
             state.step = "done"
             return f"Принял, {state.name}. {CLOSINGS.get(state.intent, CLOSINGS['booking'])}"
         return "Напишите номер в формате +7 ___ ___ __ __ — передам администратору."

@@ -94,6 +94,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# WhatsApp transport — отдельный роутер, тот же bot_logic
+try:
+    from .whatsapp import router as whatsapp_router
+    app.include_router(whatsapp_router)
+except Exception as e:
+    import logging as _lg
+    _lg.getLogger("abramenko.web").warning("whatsapp router not loaded: %s", e)
+
 # Health
 @app.get("/api/health")
 def health():

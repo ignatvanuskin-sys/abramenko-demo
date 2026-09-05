@@ -6,3 +6,9 @@ __pycache__/
 .pytest_cache/
 .coverage
 htmlcov/
+*.db
+*.sqlite
+web_test.log
+smoke.py
+check_*.py
+audit.py

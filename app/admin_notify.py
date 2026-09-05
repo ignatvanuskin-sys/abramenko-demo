@@ -29,7 +29,7 @@ def get_admin_chat_id() -> Optional[int]:
 def is_booking_complete(state) -> bool:
     """Определяет завершённость заявки по фактическому состоянию DialogState.
 
-    Не по тексту ответа, а по полям. Для booking требует service/time/branch/name/phone,
+    Не по тексту ответа, а по полям. Для booking требует service/branch/name/phone + (time_pref или selected_slot+master),
     для vacancy/model/training — service/name/phone (portfolio опционален, время/филиал не требуются).
     """
     if getattr(state, "step", None) != "done":
@@ -40,31 +40,53 @@ def is_booking_complete(state) -> bool:
     if intent not in ("booking", "vacancy", "model", "training"):
         return False
     if intent == "booking":
-        return bool(getattr(state, "branch", None) and getattr(state, "time_pref", None))
+        has_branch = bool(getattr(state, "branch", None) or getattr(state, "branch_id", None))
+        has_time = bool(getattr(state, "time_pref", None) or getattr(state, "selected_slot", None))
+        return has_branch and has_time
     # vacancy/model/training — достаточно базы
     return True
 
 
 def build_admin_message(state, user_id: int, username: Optional[str]) -> str:
-    """Собирает текст для администратора только из реально существующих данных."""
+    """Собирает текст для администратора. Для реальных слотов — с мастером и временем."""
     service = getattr(state, "service", None) or "—"
-    time_pref = getattr(state, "time_pref", None) or "—"
     branch = getattr(state, "branch", None) or "—"
     name = getattr(state, "name", None) or "—"
     phone = getattr(state, "phone", None) or "—"
+    # время: либо selected_slot (реальные слоты), либо time_pref (демо)
+    time_str = getattr(state, "selected_slot", None) or getattr(state, "time_pref", None) or "—"
+    # форматируем ISO в локальное время если это слот
+    if getattr(state, "selected_slot", None):
+        try:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+            dt = datetime.fromisoformat(time_str)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+            time_str = dt.astimezone(ZoneInfo("Asia/Almaty")).strftime("%d.%m %Y %H:%M")
+        except Exception:
+            pass
+    master = getattr(state, "master_name", None) or getattr(state, "master_id", None) or "—"
+    if master != "—" and isinstance(master, int):
+        master = f"ID {master}"
 
     if username:
         tg_line = f"@{username}\nID: {user_id}"
     else:
         tg_line = f"без username\nID: {user_id}"
 
-    # Эмодзи как в ТЗ, но без HTML — plain text
+    # DEMO: если это реальные слоты — показываем подтверждённую запись
+    is_real = bool(getattr(state, "selected_slot", None))
+    header = "🔔 Подтверждённая запись" if is_real else "🔔 Новая заявка"
+    master_line = f"👨‍🎨 Мастер: {master}\n" if is_real and master != "—" else ""
+
     return (
-        "🔔 Новая заявка\n"
+        f"{header}\n"
         "\n"
         f"💇 Услуга: {service}\n"
-        f"🗓 Когда: {time_pref}\n"
         f"📍 Филиал: {branch}\n"
+        f"{master_line}"
+        f"🗓 Когда: {time_str}\n"
         f"👤 Имя: {name}\n"
         f"📞 Телефон: {phone}\n"
         "\n"

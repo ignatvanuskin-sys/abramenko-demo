@@ -16,10 +16,29 @@ def test_premium_replaces_mapped():
     assert "🙂" not in bare and "✅" not in bare
 
 
-def test_premium_keeps_unmapped():
+def test_premium_strips_unmapped():
+    # обычных эмодзи вне таблицы быть не должно — только premium ID владельца
     out = premium("Балаяж 💇 стоит 25 000 ₸ 📞")
-    assert "💇" in out and "📞" in out
+    assert "💇" not in out and "📞" not in out
     assert "<tg-emoji" not in out
+
+
+def test_premium_no_regular_emoji_left():
+    import re
+    from app.bot_logic import DialogState, reply
+    strip_re = re.compile(
+        "[\U0001F000-\U0001FAFF\u2600-\u2604\u2606-\u26FF\u2700-\u27BF"
+        "\u2B00-\u2BFF\uFE0F\u200d\U0001F1E6-\U0001F1FF]"
+    )
+    samples = ["хочу балаяж", "окрашены", "будни", "Жамбыла", "Айгерим",
+               "+7 707 123 45 67", "где вы?", "сколько стоит балаяж?",
+               "как поступить в вуз", "ты дура", "Здравствуйте"]
+    for msg in samples:
+        out = premium(reply(DialogState(), msg))
+        bare = re.sub(r'<tg-emoji[^>]*>.*?</tg-emoji>', '', out)
+        assert not strip_re.search(bare), msg
+    # звёздочка рейтинга сохраняется
+    assert "★" in premium("4.8 ★ · 191 оценка")
 
 
 def test_premium_empty():

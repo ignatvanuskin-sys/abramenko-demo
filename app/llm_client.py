@@ -28,6 +28,8 @@ from .prompt_loader import load_system_prompt
 
 logger = logging.getLogger("abramenko.llm")
 _system_prompt_cache: Optional[str] = None
+# Счётчики для /api/metrics (без PII)
+LLM_STATS: Dict[str, int] = {"calls": 0, "failures": 0}
 
 def _get_system_prompt() -> str:
     global _system_prompt_cache
@@ -180,6 +182,7 @@ def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
                 logger.info("llm ok provider=%s model=%s temp=%s total_ms=%.0f ttfb_ms=%.0f", cur_cfg["provider"], cur_cfg["model"], temperature, dt, t_first)
                 if not result:
                     raise RuntimeError("empty llm response")
+                LLM_STATS["calls"] += 1
                 return result
             except Exception as e:
                 last_err = e
@@ -194,6 +197,7 @@ def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
         if attempt == 0 and _get_fallback_config() is not None:
             continue
         if last_err:
+            LLM_STATS["failures"] += 1
             raise last_err
 
     # сюда не должны попасть

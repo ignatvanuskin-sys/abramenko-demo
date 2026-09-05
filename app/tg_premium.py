@@ -2,8 +2,11 @@
 
 bot_logic/web/WhatsApp НЕ трогаем: tg-теги там отобразятся сырым текстом.
 Всё маппим только из таблицы владельца, ID не выдумываем.
+Обычные эмодзи, которых нет в таблице, вычищаются (правило владельца).
 """
 from __future__ import annotations
+
+import re as _re
 
 # emoji -> premium emoji-id (таблица владельца)
 EMOJI_IDS: dict[str, str] = {
@@ -31,11 +34,24 @@ ICON_CONTACT = "5870994129244131212"   # 👤 Профиль
 ICON_BRUSH = "6050679691004612757"     # 🖌 Кисточка
 
 
+# Всё остальное из эмодзи-блоков вычищается. ★/☆ оставляем — это текстовые
+# символы рейтинга, а не эмодзи, и в таблице их нет.
+_STRIP_RE = _re.compile(
+    "[\U0001F000-\U0001FAFF\u2600-\u2604\u2606-\u26FF\u2700-\u27BF"
+    "\u2B00-\u2BFF\uFE0F\u200d\U0001F1E6-\U0001F1FF]"
+)
+
+
 def premium(text: str) -> str:
-    """Заменяет известные обычные эмодзи на <tg-emoji>. Остальное не трогает."""
+    """Известные эмодзи → <tg-emoji>, остальные обычные эмодзи — удалить."""
     if not text:
         return text
+    # сначала чистим несопоставленные, потом ставим теги (иначе strip съест эмодзи внутри тегов)
+    mapped = set(EMOJI_IDS)
+    text = "".join(ch for ch in text if ch in mapped or not _STRIP_RE.match(ch))
     for emoji, eid in EMOJI_IDS.items():
         if emoji in text:
             text = text.replace(emoji, f'<tg-emoji emoji-id="{eid}">{emoji}</tg-emoji>')
-    return text
+    text = _re.sub(r"\n +", "\n", text)
+    text = _re.sub(r" {2,}", " ", text)
+    return text.strip()

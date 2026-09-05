@@ -153,3 +153,32 @@ def test_webhook_body_too_large(monkeypatch):
     c = TestClient(app)
     r = c.post("/webhook/whatsapp", content=b"x" * 1_000_001, headers={"Content-Type": "application/json"})
     assert r.status_code == 413
+
+
+def test_metrics_p95_and_llm_stats():
+    c = TestClient(app)
+    for i in range(3):
+        c.post("/api/chat", json={"session_id": f"m-{i}", "message": "привет"})
+    r = c.get("/api/metrics")
+    body = r.json()
+    assert body["chat_requests"] >= 3
+    assert body["chat_p95_ms"] >= 0
+    assert "llm_calls" in body and "llm_failures" in body
+
+
+def test_ip_rate_limit(monkeypatch):
+    import app.web_api as w
+    monkeypatch.setattr(w, "_IP_RATE_LIMIT", 2)
+    w._RATE.clear()
+    c = TestClient(app)
+    for i in range(2):
+        assert c.post("/api/chat", json={"session_id": f"ip-{i}", "message": "привет"}).status_code == 200
+    r = c.post("/api/chat", json={"session_id": "ip-2", "message": "привет"})
+    assert r.status_code == 429
+    w._RATE.clear()
+
+
+def test_cancel_button_in_demo():
+    c = TestClient(app)
+    html = c.get("/").text
+    assert 'id="btn-cancel"' in html

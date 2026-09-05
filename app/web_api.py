@@ -12,7 +12,7 @@ import re
 import uuid
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -29,12 +29,22 @@ _WEB_STORE: dict[str, DialogState] = {}
 _WEB_SEEN: dict[str, float] = {}
 _SESSION_CAP = 2000
 _SESSION_TTL = 86400  # 24ч без активности — сессия чистится
-# Rate limit: максимум сообщений в окне на одну сессию
+# Rate limit: максимум сообщений в окне на одну сессию + глобально по IP
 _RATE_LIMIT = 30
 _RATE_WINDOW = 60.0
 _RATE: dict[str, list] = {}
+_IP_RATE_LIMIT = 120
+_IP_RATE: dict[str, list] = {}
 # Метрики (без секретов и PII)
 _METRICS = {"chat_requests": 0, "chat_total_ms": 0.0, "chat_429": 0}
+_LAT_MS: list = []
+_LAT_CAP = 500
+
+
+def _p95(values: list) -> float:
+    if not values:
+        return 0.0
+    return sorted(values)[min(len(values) - 1, int(len(values) * 0.95))]
 
 def _prune_sessions(now: float | None = None) -> None:
     import time as _time
@@ -47,11 +57,11 @@ def _prune_sessions(now: float | None = None) -> None:
         _WEB_STORE.pop(oldest, None)
         _WEB_SEEN.pop(oldest, None)
 
-def _check_rate(session_id: str, now: float | None = None) -> bool:
+def _check_rate(session_id: str, now: float | None = None, limit: int | None = None) -> bool:
     import time as _time
     now = now if now is not None else _time.monotonic()
     arr = [t for t in _RATE.get(session_id, []) if now - t < _RATE_WINDOW]
-    if len(arr) >= _RATE_LIMIT:
+    if len(arr) >= (limit if limit is not None else _RATE_LIMIT):
         _RATE[session_id] = arr
         return False
     arr.append(now)
@@ -158,10 +168,17 @@ def health():
 def metrics():
     n = _METRICS["chat_requests"]
     avg = _METRICS["chat_total_ms"] / n if n else 0.0
+    try:
+        from .llm_client import LLM_STATS
+    except ImportError:  # pragma: no cover
+        from llm_client import LLM_STATS
     return {
         "chat_requests": n,
         "chat_avg_ms": round(avg, 1),
+        "chat_p95_ms": round(_p95(_LAT_MS), 1),
         "chat_rate_limited": _METRICS["chat_429"],
+        "llm_calls": LLM_STATS.get("calls", 0),
+        "llm_failures": LLM_STATS.get("failures", 0),
         "sessions": len(_WEB_STORE),
     }
 
@@ -171,13 +188,16 @@ from contextlib import asynccontextmanager
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     import logging as _lg
-    _lg.getLogger("abramenko.web").info(
+    log = _lg.getLogger("abramenko.web")
+    log.info(
         "startup graph_version=%s has_telegram=%s has_llm=%s has_wa_secret=%s",
         (os.getenv("GRAPH_API_VERSION") or "v21.0"),
         bool(os.getenv("TELEGRAM_BOT_TOKEN")),
         bool(os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")),
         bool(os.getenv("WHATSAPP_APP_SECRET")),
     )
+    if (os.getenv("WHATSAPP_ALLOW_UNVERIFIED") or "") == "1":
+        log.error("SECURITY: WHATSAPP_ALLOW_UNVERIFIED=1 — подпись вебхука отключена, только для локальной разработки!")
     yield
 
 
@@ -198,13 +218,14 @@ def reset(req: ResetRequest):
     )
 
 @app.post("/api/chat", response_model=ChatResponse)
-async def chat(req: ChatRequest):
+async def chat(req: ChatRequest, request: Request):
     import time as _time
     t0 = _time.monotonic()
     sid = (req.session_id or "").strip()
     if not sid:
         sid = str(uuid.uuid4())
-    if not _check_rate(sid):
+    ip = request.client.host if request.client else "unknown"
+    if not _check_rate("ip:" + ip, limit=_IP_RATE_LIMIT) or not _check_rate(sid):
         _METRICS["chat_429"] += 1
         raise HTTPException(status_code=429, detail="Слишком много сообщений. Подождите немного и попробуйте снова.")
     # защита от XSS — не исполняем HTML, но и не ломаем логику бизнес-слоя
@@ -250,7 +271,11 @@ async def chat(req: ChatRequest):
 
     import time as _time2
     _METRICS["chat_requests"] += 1
-    _METRICS["chat_total_ms"] += (_time2.monotonic() - t0) * 1000
+    _elapsed = (_time2.monotonic() - t0) * 1000
+    _METRICS["chat_total_ms"] += _elapsed
+    _LAT_MS.append(_elapsed)
+    if len(_LAT_MS) > _LAT_CAP:
+        del _LAT_MS[: len(_LAT_MS) - _LAT_CAP]
     return ChatResponse(message=safe_answer, buttons=buttons, done=done, step=st.step)
 
 # Статика — фронт demo. Папка web/ в корне проекта.

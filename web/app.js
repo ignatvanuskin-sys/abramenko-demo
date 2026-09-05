@@ -103,7 +103,8 @@ sendBtn.addEventListener('click', ()=> send());
 inputEl.addEventListener('keydown', e=>{
   if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); send(); }
 });
-btnReset.addEventListener('click', async ()=>{
+async function resetDialog(){
+  if(isSending) return;
   chatEl.innerHTML='';
   setDoneUI(false);
   quickEl.innerHTML='';
@@ -116,7 +117,9 @@ btnReset.addEventListener('click', async ()=>{
     addBubble('Здравствуйте! 👋 Я помогу подобрать услугу и записаться в студию. Чем могу помочь?', 'bot');
     renderButtons(["Хочу записаться","Сколько стоит балаяж?","Где вы находитесь?"]);
   }
-});
+}
+btnReset.addEventListener('click', resetDialog);
+document.getElementById('btn-cancel').addEventListener('click', resetDialog);
 
 // старт: приветствие из бота
 (async()=>{

@@ -248,17 +248,18 @@ def _ask_master(state) -> str:
         return "На какую дату смотрим? Напишите, например, «завтра» или «на этой неделе»."
 
 def _format_slots(slots: list) -> str:
-    # slots — list of ISO strings UTC, показываем в TZ филиала
+    # slots — ISO строки. Наивные (SQLite/Demo-БД) = локальное время филиала,
+    # с tzinfo=UTC = UTC. Показываем в TZ филиала.
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    import os
     tz = ZoneInfo("Asia/Almaty")
     lines = []
     for i, iso in enumerate(slots[:3], 1):
         dt = datetime.fromisoformat(iso)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
-        local = dt.astimezone(tz)
+            local = dt  # уже локальное
+        else:
+            local = dt.astimezone(tz)
         lines.append(f"{i}) {local.strftime('%d.%m %H:%M')}")
     return "\n".join(lines)
 
@@ -302,8 +303,10 @@ def _show_slots(state) -> str:
         db.close()
         if not slots:
             return "К сожалению, свободных окон на ближайшие 7 дней нет. Напишите другую дату или филиал."
-        # сохраняем как ISO
-        state.slots = [s.isoformat() for s in slots[:3]]
+        # сохраняем как ISO в ЛОКАЛЬНОМ времени филиала — клиент выбирает именно его
+        from zoneinfo import ZoneInfo
+        _tz_local = ZoneInfo("Asia/Almaty")
+        state.slots = [s.astimezone(_tz_local).isoformat() for s in slots[:3]]
         who = f"У мастера {state.master_name} " if getattr(state, "master_name", None) else ""
         return f"{who}свободные окна:\n{_format_slots(state.slots)}\nНапишите 1, 2 или 3 чтобы выбрать."
     except Exception as e:
@@ -518,6 +521,7 @@ def reply(state: DialogState, user_text: str) -> str:
                 from sqlalchemy.orm import sessionmaker
                 from dateutil.parser import isoparse
                 from datetime import timezone
+                from zoneinfo import ZoneInfo as _ZI
                 db_url = os.getenv("DATABASE_URL")
                 engine = create_engine(db_url)
                 Session = sessionmaker(bind=engine)
@@ -532,13 +536,19 @@ def reply(state: DialogState, user_text: str) -> str:
                         m_id = masters[0]["id"]
                         state.master_id = m_id
                 starts_at = isoparse(state.selected_slot)
-                if starts_at.tzinfo is None:
-                    starts_at = starts_at.replace(tzinfo=timezone.utc)
+                # слоты показывались клиенту в локальном времени (10:00 Almaty),
+                # ISO в state.slots уже в локальном Almaty — помечаем как Almaty для БД
+                starts_at_local_naive = starts_at.replace(tzinfo=None)
+                starts_at = starts_at_local_naive.replace(tzinfo=_ZI("Asia/Almaty"))
                 from .booking import create_booking as _create
                 appt = _create(db, b_id, m_id, s_id, state.name or "Клиент", state.phone, starts_at)
                 db.commit()
+                # SQLite теряет tzinfo: наивное значение из БД = локальное время филиала
                 from zoneinfo import ZoneInfo
-                local = appt.starts_at.astimezone(ZoneInfo("Asia/Almaty")) if appt.starts_at.tzinfo else appt.starts_at
+                if appt.starts_at.tzinfo is None:
+                    local = appt.starts_at.replace(tzinfo=_ZI("Asia/Almaty"))
+                else:
+                    local = appt.starts_at.astimezone(_ZI("Asia/Almaty"))
                 state.step = "done"
                 name = state.name or "Клиент"
                 return f"Вы записаны, {name}! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Ждём вас!".strip()
@@ -943,6 +953,7 @@ def reply(state: DialogState, user_text: str) -> str:
                     from sqlalchemy.orm import sessionmaker
                     from dateutil.parser import isoparse
                     from datetime import timezone
+                    from zoneinfo import ZoneInfo
                     db_url = os.getenv("DATABASE_URL")
                     engine = create_engine(db_url)
                     Session = sessionmaker(bind=engine)
@@ -959,22 +970,15 @@ def reply(state: DialogState, user_text: str) -> str:
                             m_id = masters[0]["id"]
                             state.master_id = m_id
                     starts_at = isoparse(state.selected_slot)
+                    # наивные значения из demo-БД — локальное время филиала, не UTC
                     if starts_at.tzinfo is None:
-                        starts_at = starts_at.replace(tzinfo=timezone.utc)
+                        starts_at = starts_at.replace(tzinfo=ZoneInfo("Asia/Almaty"))
                     from .booking import create_booking as _create
                     appt = _create(db, b_id, m_id, s_id, state.name, state.phone, starts_at)
                     db.commit()
                     # форматируем для клиента
-                    from zoneinfo import ZoneInfo
                     local = appt.starts_at.astimezone(ZoneInfo("Asia/Almaty")) if appt.starts_at.tzinfo else appt.starts_at
                     state.step = "done"
-                    # admin notify теперь с датой/временем — делается в bot_logic, но также в web_api
-                    try:
-                        import asyncio
-                        from .admin_notify import notify_admin_booking
-                        # если есть бот — уведомим, но не блокируем
-                    except Exception:
-                        pass
                     return f"Вы записаны! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Ждём вас!".strip()
                 except ValueError as e:
                     if "занят" in str(e):

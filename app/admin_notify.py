@@ -64,7 +64,7 @@ def build_admin_message(state, user_id: int, username: Optional[str]) -> str:
             from zoneinfo import ZoneInfo
             dt = datetime.fromisoformat(time_str)
             if dt.tzinfo is None:
-                dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+                dt = dt.replace(tzinfo=ZoneInfo("Asia/Almaty"))
             time_str = dt.astimezone(ZoneInfo("Asia/Almaty")).strftime("%d.%m %Y %H:%M")
         except Exception:
             pass

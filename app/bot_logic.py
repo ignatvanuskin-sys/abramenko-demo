@@ -89,10 +89,10 @@ def _find_price(text: str):
     for key, val in PRICES.items():
         if key in t:
             return val
-    # опечатки: балияж/балаж
-    if "окрашиван" in t or "airtouch" in t or "балаяж" in t or "балияж" in t or "балаж" in t or "мелирован" in t or "блонд" in t:
+    # опечатки: балияж/балаж; синонимы: покраска/покрасить, подстричься, каре
+    if "окрашиван" in t or "покрас" in t or "airtouch" in t or "балаяж" in t or "балияж" in t or "балаж" in t or "мелирован" in t or "блонд" in t:
         return "Балаяж / AirTouch / мелирование — 25 000–80 000 ₸, точную сумму назовут на консультации"
-    if "стрижк" in t:
+    if "стрижк" in t or "стрич" in t or "каре" in t:
         return f"{PRICES['женская стрижка']}, {PRICES['мужская стрижка']}"
     return None
 
@@ -123,6 +123,7 @@ SALON_KEYWORDS = [
     "выходн", "администратор", "контакт", "телефон", "имя", "парков", "отзыв",
     "рейтинг", "премия", "свадеб", "прическ", "прикорнев", "холодн",
     "кератин", "ламинирован", "укладк", "мелир", "блонд", "airtouch",
+    "покрас", "стрич", "каре", "шеллак", "покрытие", "коррекция",
 ]
 
 OFF_TOPIC_KEYWORDS = [
@@ -436,14 +437,14 @@ def detect_intent(text: str):
             return "vacancy"
     if any(w in t for w in ["ищете мастер", "требуется мастер"]):
         return "vacancy"
-    if any(w in t for w in ["запис", "хочу", "окраш", "стриж", "балаяж", "ногт", "маникюр", "эпиляц", "бров", "свадеб", "цен", "стоим", "филиал", "где", "жамбыл", "букетов", "мадам", "madame"]):
+    if any(w in t for w in ["запис", "хочу", "окраш", "покрас", "стриж", "стрич", "каре", "балаяж", "ногт", "маникюр", "шеллак", "покрытие", "коррекция", "эпиляц", "бров", "свадеб", "цен", "стоим", "филиал", "где", "жамбыл", "букетов", "мадам", "madame"]):
         return "booking"
     return None
 
 
 def _is_coloring(text_low: str) -> bool:
-    # терпим опечатки: балияж/балаж, мелир etc
-    return any(w in text_low for w in ["окраш", "балаяж", "балияж", "балаж", "блонд", "мелир", "airtouch", "шатуш", "контуринг", "dim-out", "dim out", "total blond"])
+    # терпим опечатки: балияж/балаж, мелир etc; синонимы: покраска, каре
+    return any(w in text_low for w in ["окраш", "покрас", "балаяж", "балияж", "балаж", "блонд", "мелир", "airtouch", "шатуш", "контуринг", "dim-out", "dim out", "total blond"])
 
 
 def _looks_like_question(text: str) -> bool:
@@ -625,11 +626,14 @@ def reply(state: DialogState, user_text: str) -> str:
             # если сразу сказали услугу с окрашиванием — сохраним
             if _is_coloring(low):
                 state.service = text
+            elif any(kw in low for kw in ["стриж", "стрич", "каре", "ногт", "маникюр", "педикюр", "шеллак", "покрытие", "коррекция", "наращиван", "бров", "эпиляц", "лазер", "визаж", "макияж", "свадеб", "прическ", "ботокс", "завив", "кератин", "ламинирован"]):
+                # конкретная не-окрасочная услуга — сохраняем, вопрос про волосы не задаём
+                state.service = text
             # переходим к первому незаполненному шагу
             if not state.service:
                 state.step = "clarify"
                 return _clarify_question(state, text)
-            if not state.hair:
+            if not state.hair and _is_coloring((state.service or "").lower()):
                 state.step = "clarify_hair"
                 return "Балаяж — это красиво, но результат сильно зависит от того, что сейчас с волосами. Они сейчас окрашены или свой цвет?"
             if not state.time_pref:

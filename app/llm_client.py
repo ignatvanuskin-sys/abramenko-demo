@@ -9,7 +9,7 @@ Env:
   LLM_API_KEY=...            (приоритет над OPENAI_API_KEY/GROQ_API_KEY)
   LLM_BASE_URL=https://api.groq.com/openai/v1
   LLM_TIMEOUT=5
-  LLM_MAX_TOKENS=180
+  LLM_MAX_TOKENS=120
   LLM_FALLBACK_PROVIDER=openai (опционально)
   LLM_FALLBACK_MODEL=gpt-4o-mini
   LLM_FALLBACK_API_KEY=...
@@ -87,7 +87,7 @@ def _get_config(prefix: str = "LLM") -> Optional[Dict[str, str]]:
             model = "gpt-4o-mini"
 
     timeout = int(os.getenv(f"{prefix}_TIMEOUT") or os.getenv("LLM_TIMEOUT") or "5")
-    max_tokens = int(os.getenv(f"{prefix}_MAX_TOKENS") or os.getenv("LLM_MAX_TOKENS") or "180")
+    max_tokens = int(os.getenv(f"{prefix}_MAX_TOKENS") or os.getenv("LLM_MAX_TOKENS") or "120")
 
     return {
         "provider": provider,
@@ -113,7 +113,7 @@ def _get_fallback_config() -> Optional[Dict[str, str]]:
             "base_url": os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").strip(),
             "model": os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini",
             "timeout": os.getenv("LLM_TIMEOUT", "5"),
-            "max_tokens": os.getenv("LLM_MAX_TOKENS", "180"),
+            "max_tokens": os.getenv("LLM_MAX_TOKENS", "120"),
         }
     return None
 
@@ -157,8 +157,8 @@ def _call_openai_compatible(cfg: Dict[str, str], messages: List[Dict[str, str]],
 
 def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     """Основной вызов с failover. Никогда не должен вешать WhatsApp webhook."""
-    # ограничим контекст: последние 6 сообщений максимум
-    msgs = messages[-6:] if len(messages) > 6 else messages
+    # ограничим контекст: последние 4 сообщений максимум (скорость)
+    msgs = messages[-4:] if len(messages) > 4 else messages
     # быстрый путь — primary
     cfg = _get_config()
     if not cfg:

@@ -21,35 +21,56 @@ logger = logging.getLogger("abramenko.whatsapp")
 
 # In-memory stores — отдельный адаптер, заменяется на Redis/Postgres без изменения bot_logic
 _WA_STORE: Dict[str, DialogState] = {}
-_WA_DEDUP: Set[str] = set()
+_WA_SEEN: Dict[str, float] = {}
+# dedup как ordered-dict: sliding window, вытесняем самые старые (без полного clear)
+_WA_DEDUP: Dict[str, None] = {}
+_DEDUP_CAP = 5000
+_SESSION_CAP = 2000
+_SESSION_TTL = 86400  # 24ч без активности — сессия чистится
+# WhatsApp text message лимит Meta — 4096, webhook body режем раньше
+_MAX_BODY = 1_000_000
 
 GRAPH_VERSION_DEFAULT = "v21.0"
 
 def _get_state(wa_id: str) -> DialogState:
+    import time as _time
+    now = _time.monotonic()
     if wa_id not in _WA_STORE:
         _WA_STORE[wa_id] = DialogState()
+    _WA_SEEN[wa_id] = now
+    _prune_sessions(now)
     return _WA_STORE[wa_id]
+
+def _prune_sessions(now: float | None = None) -> None:
+    import time as _time
+    now = now if now is not None else _time.monotonic()
+    # сначала протухшие по TTL
+    for sid in [s for s, seen in _WA_SEEN.items() if now - seen > _SESSION_TTL]:
+        _WA_STORE.pop(sid, None)
+        _WA_SEEN.pop(sid, None)
+    # затем самые старые при переполнении
+    while len(_WA_STORE) > _SESSION_CAP:
+        oldest = min(_WA_SEEN, key=lambda s: _WA_SEEN[s])
+        _WA_STORE.pop(oldest, None)
+        _WA_SEEN.pop(oldest, None)
 
 def _is_dedup(message_id: str) -> bool:
     return message_id in _WA_DEDUP
 
 def _mark_dedup(message_id: str) -> None:
-    _WA_DEDUP.add(message_id)
-    # ограничим размер для MVP
-    if len(_WA_DEDUP) > 5000:
-        _WA_DEDUP.clear()
+    _WA_DEDUP[message_id] = None
+    # sliding window: вытесняем самые старые, а не чистим всё
+    while len(_WA_DEDUP) > _DEDUP_CAP:
+        _WA_DEDUP.pop(next(iter(_WA_DEDUP)))
 
 def verify_signature(raw_body: bytes, signature_header: str | None) -> bool:
     secret = (os.getenv("WHATSAPP_APP_SECRET") or "").strip()
     if not secret:
-        # если секрет не настроен — fail-closed только если заголовок присутствует? По ТЗ fail-closed всегда.
-        # Но для локальных тестов без секрета пропускаем?
-        # ТЗ: отсутствует signature → reject. Значит если секрета нет, тоже reject если заголовок есть.
-        # Если секрета нет и заголовка нет — для dev пропускаем (иначе локально не протестировать).
-        # В production секрет всегда должен быть.
-        if signature_header:
-            return False
-        return True
+        # fail-closed: без секрета принимаем только явный dev-режим
+        # В production WHATSAPP_APP_SECRET обязателен, иначе любой шлёт фейковые сообщения
+        if (os.getenv("WHATSAPP_ALLOW_UNVERIFIED") or "") == "1":
+            return True
+        return False
     if not signature_header:
         return False
     if not signature_header.startswith("sha256="):
@@ -130,23 +151,38 @@ async def _send_whatsapp_message(wa_id: str, text: str):
     url = f"https://graph.facebook.com/{version}/{phone_id}/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": wa_id, "type": "text", "text": {"body": text[:4096]}}
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.post(url, headers=headers, json=payload)
-            if 200 <= resp.status_code < 300:
-                logger.info("whatsapp sent to %s status=%s", wa_id, resp.status_code)
+    import asyncio as _asyncio
+    # retry с backoff на 5xx/timeout (429 от Meta — ждём и пробуем раз)
+    for attempt in range(2):
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if 200 <= resp.status_code < 300:
+                    logger.info("whatsapp sent to %s status=%s", wa_id, resp.status_code)
+                    return
+                if resp.status_code == 429:
+                    logger.warning("whatsapp 429 wa_id=%s body=%s", wa_id, resp.text[:200])
+                    if attempt == 0:
+                        await _asyncio.sleep(2)
+                        continue
+                    return
+                if 400 <= resp.status_code < 500:
+                    logger.warning("whatsapp 4xx wa_id=%s status=%s body=%s", wa_id, resp.status_code, resp.text[:200])
+                    return
+                logger.warning("whatsapp 5xx wa_id=%s status=%s attempt=%s", wa_id, resp.status_code, attempt)
+                if attempt == 0:
+                    await _asyncio.sleep(2)
+                    continue
                 return
-            if resp.status_code == 429:
-                logger.warning("whatsapp 429 wa_id=%s body=%s", wa_id, resp.text[:200])
-                return
-            if 400 <= resp.status_code < 500:
-                logger.warning("whatsapp 4xx wa_id=%s status=%s body=%s", wa_id, resp.status_code, resp.text[:200])
-                return
-            logger.warning("whatsapp 5xx wa_id=%s status=%s", wa_id, resp.status_code)
-    except httpx.TimeoutException:
-        logger.warning("whatsapp timeout wa_id=%s", wa_id)
-    except Exception as e:
-        logger.exception("whatsapp send failed wa_id=%s: %s", wa_id, e)
+        except httpx.TimeoutException:
+            logger.warning("whatsapp timeout wa_id=%s attempt=%s", wa_id, attempt)
+            if attempt == 0:
+                await _asyncio.sleep(2)
+                continue
+            return
+        except Exception as e:
+            logger.exception("whatsapp send failed wa_id=%s: %s", wa_id, e)
+            return
 
 router = APIRouter()
 
@@ -163,6 +199,9 @@ async def whatsapp_verify(request: Request):
 @router.post("/webhook/whatsapp")
 async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
     raw = await request.body()
+    if len(raw) > _MAX_BODY:
+        logger.warning("whatsapp body too large: %d bytes", len(raw))
+        raise HTTPException(status_code=413, detail="payload too large")
     sig = request.headers.get("X-Hub-Signature-256")
     if not verify_signature(raw, sig):
         # fail-closed: не логируем секрет, не логируем полный payload с PII
@@ -185,4 +224,5 @@ async def whatsapp_webhook(request: Request, background_tasks: BackgroundTasks):
 # для тестов: сброс
 def _reset_for_tests():
     _WA_STORE.clear()
+    _WA_SEEN.clear()
     _WA_DEDUP.clear()

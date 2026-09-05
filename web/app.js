@@ -82,14 +82,9 @@ async function send(text){
   quickEl.innerHTML='';
   addBubble(msg, 'user');
   showTyping(true);
-  // 400-900 ms как в ТЗ
-  const delay = 400 + Math.random()*500;
-  await new Promise(res=>setTimeout(res, delay));
   try{
     const data = await apiChat(msg);
     showTyping(false);
-    // небольшая задержка для плавности
-    await new Promise(res=>setTimeout(res, 120));
     addBubble(data.message, 'bot');
     renderButtons(data.buttons);
     setDoneUI(!!data.done);
@@ -125,8 +120,11 @@ btnReset.addEventListener('click', async ()=>{
 
 // старт: приветствие из бота
 (async()=>{
+  try {
+    const h = await fetch('/api/health');
+    if (!h.ok) document.getElementById('wa-status').textContent = 'offline • попробуйте позже';
+  } catch { document.getElementById('wa-status').textContent = 'offline • попробуйте позже'; }
   showTyping(true);
-  await new Promise(r=>setTimeout(r,600));
   try{
     const data = await apiChat('');
     showTyping(false);

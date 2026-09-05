@@ -75,12 +75,12 @@ def test_full_booking_flow():
 
 def test_booking_without_coloring_skips_hair_question():
     s = DialogState()
-    reply(s, "хочу стрижку")
-    # для стрижки вопроса про окрашены нет — сразу время
-    assert s.step == "clarify"
-    # следующий ответ — время
-    out = reply(s, "женская стрижка")
+    out = reply(s, "хочу стрижку")
+    # услуга уже названа — повторного вопроса про услугу нет, сразу время
+    assert "окрашивание, стрижка" not in out
     assert "будни" in out.lower() or "выходные" in out.lower()
+    assert s.step == "time"
+    assert s.service == "хочу стрижку"
 
 
 def test_phone_completes_even_if_sent_late():
@@ -188,6 +188,8 @@ def test_mask_phone_does_not_leak_full_number():
     assert "****" in masked
 
 
-def test_mask_text_truncates_long():
+def test_mask_text_keeps_full_masked():
     long = "a" * 200
-    assert mask_text_for_log(long).endswith("…")
+    out = mask_text_for_log(long)
+    assert out == long  # без обрезки, нужно для разбора инцидентов
+    assert "+7 707 123 45 67" not in mask_text_for_log("тел +7 707 123 45 67 ок")

@@ -59,10 +59,8 @@ def mask_phone(text: str) -> str:
 def mask_text_for_log(text: Optional[str]) -> str:
     if not text:
         return ""
-    masked = mask_phone(text)
-    if len(masked) > 120:
-        return masked[:120] + "…"
-    return masked
+    # телефон маскируется, остальное пишем полностью — нужно для разбора инцидентов
+    return mask_phone(text)
 
 
 def get_token() -> str:
@@ -100,6 +98,21 @@ async def main() -> None:
     store = InMemorySessionStore()
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    # антифлуд: минимум сообщений в окне на пользователя
+    _flood: dict = {}
+    _FLOOD_LIMIT = 20
+    _FLOOD_WINDOW = 60.0
+
+    def _flood_ok(uid: int) -> bool:
+        import time as _time
+        now = _time.monotonic()
+        arr = [t for t in _flood.get(uid, []) if now - t < _FLOOD_WINDOW]
+        if len(arr) >= _FLOOD_LIMIT:
+            _flood[uid] = arr
+            return False
+        arr.append(now)
+        _flood[uid] = arr
+        return True
 
     @dp.message(Command("start"))
     async def on_start(msg: Message) -> None:
@@ -114,6 +127,24 @@ async def main() -> None:
             logger.info("sent welcome", extra={"user_id": uid})
         except Exception as e:
             logger.exception("on_start failed: %s", e, extra={"user_id": uid})
+            try:
+                await msg.answer(FALLBACK_ERROR_TEXT, reply_markup=kb_remove())
+            except Exception:
+                pass
+
+    @dp.message(Command("cancel"))
+    async def on_cancel(msg: Message) -> None:
+        uid = msg.from_user.id if msg.from_user else 0
+        logger.info("cmd /cancel", extra={"user_id": uid})
+        try:
+            store.reset(uid)
+            store.get(uid).greeted = True
+            await msg.answer(
+                "Диалог сброшен. Что вас интересует — запись, модель, вакансия или обучение?",
+                reply_markup=keyboard_for_step("start"),
+            )
+        except Exception as e:
+            logger.exception("on_cancel failed: %s", e, extra={"user_id": uid})
             try:
                 await msg.answer(FALLBACK_ERROR_TEXT, reply_markup=kb_remove())
             except Exception:
@@ -173,6 +204,10 @@ async def main() -> None:
         if not raw.strip():
             logger.warning("empty text", extra={"user_id": uid})
             await msg.answer("Напишите, пожалуйста, текстом — я подскажу.", reply_markup=kb_remove())
+            return
+        if not _flood_ok(uid):
+            logger.warning("flood limit user_id=%s", uid, extra={"user_id": uid})
+            await msg.answer("Слишком много сообщений. Подождите немного и попробуйте снова.", reply_markup=kb_remove())
             return
         state: DialogState = store.get(uid)
         log_in = mask_text_for_log(raw)

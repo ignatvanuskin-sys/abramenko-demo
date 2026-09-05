@@ -48,11 +48,13 @@ def is_booking_complete(state) -> bool:
 
 
 def build_admin_message(state, user_id: int, username: Optional[str]) -> str:
-    """Собирает текст для администратора. Для реальных слотов — с мастером и временем."""
-    service = getattr(state, "service", None) or "—"
-    branch = getattr(state, "branch", None) or "—"
-    name = getattr(state, "name", None) or "—"
-    phone = getattr(state, "phone", None) or "—"
+    """Собирает текст для администратора только из реально существующих данных."""
+    import html as _html
+    # пользовательский ввод экранируем: сообщение уходит в Telegram с parse_mode=HTML
+    service = _html.escape(str(getattr(state, "service", None) or "—"), quote=False)
+    branch = _html.escape(str(getattr(state, "branch", None) or "—"), quote=False)
+    name = _html.escape(str(getattr(state, "name", None) or "—"), quote=False)
+    phone = _html.escape(str(getattr(state, "phone", None) or "—"), quote=False)
     # время: либо selected_slot (реальные слоты), либо time_pref (демо)
     time_str = getattr(state, "selected_slot", None) or getattr(state, "time_pref", None) or "—"
     # форматируем ISO в локальное время если это слот

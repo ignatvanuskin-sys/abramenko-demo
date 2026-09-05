@@ -13,8 +13,9 @@ import uuid
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -25,14 +26,50 @@ logger = logging.getLogger("abramenko.web")
 
 # Web session store — отдельно от Telegram store, но тот же класс идеи
 _WEB_STORE: dict[str, DialogState] = {}
+_WEB_SEEN: dict[str, float] = {}
+_SESSION_CAP = 2000
+_SESSION_TTL = 86400  # 24ч без активности — сессия чистится
+# Rate limit: максимум сообщений в окне на одну сессию
+_RATE_LIMIT = 30
+_RATE_WINDOW = 60.0
+_RATE: dict[str, list] = {}
+# Метрики (без секретов и PII)
+_METRICS = {"chat_requests": 0, "chat_total_ms": 0.0, "chat_429": 0}
+
+def _prune_sessions(now: float | None = None) -> None:
+    import time as _time
+    now = now if now is not None else _time.monotonic()
+    for sid in [s for s, seen in _WEB_SEEN.items() if now - seen > _SESSION_TTL]:
+        _WEB_STORE.pop(sid, None)
+        _WEB_SEEN.pop(sid, None)
+    while len(_WEB_STORE) > _SESSION_CAP:
+        oldest = min(_WEB_SEEN, key=lambda s: _WEB_SEEN[s])
+        _WEB_STORE.pop(oldest, None)
+        _WEB_SEEN.pop(oldest, None)
+
+def _check_rate(session_id: str, now: float | None = None) -> bool:
+    import time as _time
+    now = now if now is not None else _time.monotonic()
+    arr = [t for t in _RATE.get(session_id, []) if now - t < _RATE_WINDOW]
+    if len(arr) >= _RATE_LIMIT:
+        _RATE[session_id] = arr
+        return False
+    arr.append(now)
+    _RATE[session_id] = arr
+    return True
 
 def _get_state(session_id: str) -> DialogState:
+    import time as _time
     if session_id not in _WEB_STORE:
         _WEB_STORE[session_id] = DialogState()
+    _WEB_SEEN[session_id] = _time.monotonic()
+    _prune_sessions()
     return _WEB_STORE[session_id]
 
 def _reset_state(session_id: str) -> None:
+    import time as _time
     _WEB_STORE[session_id] = DialogState()
+    _WEB_SEEN[session_id] = _time.monotonic()
 
 def _web_buttons_for_step(step: str) -> List[str]:
     if step == "start":
@@ -89,10 +126,20 @@ app = FastAPI(title="Abramenko Studio Web Demo")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    # фронт same-origin, credentials не используются — credentials=False,
+    # иначе браузеры отбрасывают комбинацию "*" + credentials
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_handler(request, exc):
+    return JSONResponse(
+        status_code=422,
+        content={"detail": "Некорректный запрос. Проверьте текст сообщения и попробуйте снова."},
+    )
 
 # WhatsApp transport — отдельный роутер, тот же bot_logic
 try:
@@ -106,6 +153,35 @@ except Exception as e:
 @app.get("/api/health")
 def health():
     return {"status": "ok", "sessions": len(_WEB_STORE)}
+
+@app.get("/api/metrics")
+def metrics():
+    n = _METRICS["chat_requests"]
+    avg = _METRICS["chat_total_ms"] / n if n else 0.0
+    return {
+        "chat_requests": n,
+        "chat_avg_ms": round(avg, 1),
+        "chat_rate_limited": _METRICS["chat_429"],
+        "sessions": len(_WEB_STORE),
+    }
+
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    import logging as _lg
+    _lg.getLogger("abramenko.web").info(
+        "startup graph_version=%s has_telegram=%s has_llm=%s has_wa_secret=%s",
+        (os.getenv("GRAPH_API_VERSION") or "v21.0"),
+        bool(os.getenv("TELEGRAM_BOT_TOKEN")),
+        bool(os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")),
+        bool(os.getenv("WHATSAPP_APP_SECRET")),
+    )
+    yield
+
+
+app.router.lifespan_context = _lifespan
 
 WEB_GREETING = "Здравствуйте! 👋 Я администратор Abramenko Studio. Помогу с услугами и записью. Что вас интересует?"
 
@@ -123,9 +199,14 @@ def reset(req: ResetRequest):
 
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(req: ChatRequest):
+    import time as _time
+    t0 = _time.monotonic()
     sid = (req.session_id or "").strip()
     if not sid:
         sid = str(uuid.uuid4())
+    if not _check_rate(sid):
+        _METRICS["chat_429"] += 1
+        raise HTTPException(status_code=429, detail="Слишком много сообщений. Подождите немного и попробуйте снова.")
     # защита от XSS — не исполняем HTML, но и не ломаем логику бизнес-слоя
     # бизнес-логика работает с сырым текстом, экранируем только при возврате если нужно
     # здесь просто ограничиваем длину и тримим
@@ -167,6 +248,9 @@ async def chat(req: ChatRequest):
             except Exception as e:
                 logger.exception("web admin notify failed: %s", e)
 
+    import time as _time2
+    _METRICS["chat_requests"] += 1
+    _METRICS["chat_total_ms"] += (_time2.monotonic() - t0) * 1000
     return ChatResponse(message=safe_answer, buttons=buttons, done=done, step=st.step)
 
 # Статика — фронт demo. Папка web/ в корне проекта.

@@ -93,6 +93,7 @@ def test_dedup():
 def test_whatsapp_calls_reply(monkeypatch):
     wa._reset_for_tests()
     monkeypatch.setenv("WHATSAPP_APP_SECRET", "")
+    monkeypatch.setenv("WHATSAPP_ALLOW_UNVERIFIED", "1")
     monkeypatch.setenv("WHATSAPP_TOKEN", "")
     # ensure clean state
     c = TestClient(app)
@@ -172,12 +173,14 @@ def test_timeout_429_5xx(monkeypatch):
 
 def test_webhook_malformed_no_crash(monkeypatch):
     monkeypatch.setenv("WHATSAPP_APP_SECRET", "")
+    monkeypatch.setenv("WHATSAPP_ALLOW_UNVERIFIED", "1")
     c = TestClient(app)
     r = c.post("/webhook/whatsapp", json={"bad": "data"})
     assert r.status_code == 200
 
 def test_webhook_non_text_no_crash(monkeypatch):
     monkeypatch.setenv("WHATSAPP_APP_SECRET", "")
+    monkeypatch.setenv("WHATSAPP_ALLOW_UNVERIFIED", "1")
     c = TestClient(app)
     payload = {"entry": [{"changes": [{"value": {"messages": [{"from": "1", "id": "mid", "type": "image"}]}}]}]}
     r = c.post("/webhook/whatsapp", json=payload)

@@ -265,7 +265,7 @@ async def chat(req: ChatRequest, request: Request):
             try:
                 # web-demo: username = web:<short>, user_id = hash(sid)
                 uid = abs(hash(sid)) % 900000000 + 100000000
-                await notify_admin(bot, st, uid, f"web:{sid[:8]}")
+                await notify_admin(bot, st, uid, f"web:{sid[:8]}", premium=True)
             except Exception as e:
                 logger.exception("web admin notify failed: %s", e)
 

@@ -68,6 +68,18 @@ def test_keyboards_icons_valid():
                 assert not re.search(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]", btn.text), btn.text
 
 
+def test_all_transports_use_premium_notify():
+    # все три транспорта обязаны слать заявку админу с premium=True,
+    # иначе админ увидит обычные эмодзи
+    import re
+    for path in ["app/web_api.py", "app/whatsapp.py", "app/main_telegram.py"]:
+        src = open(path, encoding="utf-8").read()
+        calls = re.findall(r"await notify_admin\((.*?)\)", src, re.DOTALL)
+        assert calls, path
+        for call in calls:
+            assert "premium=True" in call, f"{path}: {call.strip()[:60]}"
+
+
 def test_notify_premium_flag():
     import asyncio
     from unittest.mock import AsyncMock

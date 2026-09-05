@@ -137,7 +137,7 @@ async def _process_whatsapp_message(wa_id: str, message_id: str, text: str):
             try:
                 # wa_id как user_id для админа (хеш)
                 uid = abs(hash(wa_id)) % 900000000 + 100000000
-                await notify_admin(bot, state, uid, f"wa:{wa_id[:8]}")
+                await notify_admin(bot, state, uid, f"wa:{wa_id[:8]}", premium=True)
             except Exception as e:
                 logger.exception("whatsapp admin notify failed: %s", e)
 

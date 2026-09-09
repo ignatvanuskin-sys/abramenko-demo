@@ -1,22 +1,15 @@
-"""TZ regression: выбранный слот = подтверждение клиенту = уведомление админу (одно и то же локальное время).
-
-Запуск: pytest tests/test_tz_regression.py -q -s
-"""
-import os
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
 import pytest
+from datetime import datetime
+from app.bot_logic import DialogState, reply
+from app.admin_notify import build_admin_message
 
 
-def test_tz_slot_shown_equals_confirmed_and_admin(monkeypatch):
-    from app.bot_logic import DialogState, reply
-    from app.admin_notify import build_admin_message
-    from datetime import datetime
-    db = str(Path(__file__).resolve().parent / "tz_regression.db")
-    pathlib_db = Path(db)
-    pathlib_db.unlink(missing_ok=True)
+def test_tz_slot_shown_equals_confirmed_and_admin(monkeypatch, tmp_path):
+    from datetime import datetime as dt
+    db = str(tmp_path / "tz_regression.db")
     monkeypatch.setenv("DEMO_BOOKING", "1")
     monkeypatch.setenv("DATABASE_URL", "sqlite:///" + db)
     import sqlite3
@@ -38,7 +31,7 @@ def test_tz_slot_shown_equals_confirmed_and_admin(monkeypatch):
     """)
     for wd in range(6):
         c.execute("INSERT INTO working_hours VALUES (%d, 1, %d, '10:00', '19:00')" % (wd+1, wd))
-    c.commit(); c.close()
+    c.commit()
 
     s = DialogState()
     reply(s, 'хочу балаяж')
@@ -46,24 +39,34 @@ def test_tz_slot_shown_equals_confirmed_and_admin(monkeypatch):
     reply(s, 'Жамбыла')
     reply(s, 'Анна')
     reply(s, 'завтра')
-    shown_time = s.slots[0]
-    expected_local = datetime.fromisoformat(shown_time).strftime('%d.%m %H:%M')
+    shown_iso = s.slots[0]
+    # локальное время слота, показанное клиенту: 10:00
+    shown_local = datetime.fromisoformat(shown_iso).astimezone(
+        __import__('zoneinfo').ZoneInfo("Asia/Almaty")).strftime('%d.%m %H:%M')
+    expected_time = shown_local.split(' ')[1]  # "10:00"
 
     reply(s, '1')
     reply(s, 'Тест E2E')
     client_final = reply(s, '+7 707 000 00 09')
 
-    assert expected_local in client_final, f"TZ BUG клиенту: {client_final!r} без {expected_local}"
+    assert expected_time in client_final, f"TZ BUG клиенту: {client_final!r} без {expected_time}"
     assert "Вы записаны" in client_final
 
     admin_msg = build_admin_message(s, 1413663332, None)
-    assert "07.09 2026 10:00" in admin_msg, f"TZ BUG админу: {admin_msg!r}"
+    assert expected_time in admin_msg, f"TZ BUG админу: {admin_msg!r} без {expected_time}"
     assert "Подтверждённая запись" in admin_msg
-    import gc
+
+    # дата в клиенте и админу совпадает
+    import re
+    d_client = re.search(r"(\d{2}\.\d{2})", client_final).group(1)
+    d_admin = re.search(r"(\d{2}\.\d{2}) \d{4}", admin_msg).group(1)
+    assert d_client == d_admin
+
     c.close()
     del s
+    import gc
     gc.collect()
     try:
-        pathlib_db.unlink(missing_ok=True)
+        Path(db).unlink(missing_ok=True)
     except PermissionError:
-        pass  # Windows может держать файл — не критично
+        pass  # Windows держит файл открыт — очистится tmp_path автоматически

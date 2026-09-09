@@ -93,10 +93,11 @@ async def main() -> None:
     from .admin_notify import notify_admin
     from .bot_logic import DialogState, reply
     from .keyboards import keyboard_for_step, kb_remove
-    from .session_store import InMemorySessionStore
+    from .session_store import PersistentSessionStore
     from .tg_premium import premium
 
-    store = InMemorySessionStore()
+    store = PersistentSessionStore(prefix="tg:")
+    logger.info("sessions backend=%s", store.backend)
     bot = Bot(token=token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
     # антифлуд: минимум сообщений в окне на пользователя
@@ -179,6 +180,7 @@ async def main() -> None:
         )
         try:
             answer = premium(reply(state, text))
+            store.set(uid, state)  # persist для Redis-backend (in-memory и так по ссылке)
         except Exception as e:
             logger.exception("reply(contact) failed: %s", e, extra={"user_id": uid})
             await msg.answer(premium(FALLBACK_ERROR_TEXT), reply_markup=kb_remove())
@@ -217,6 +219,7 @@ async def main() -> None:
         logger.info("in text='%s' step=%s intent=%s", log_in, state.step, state.intent, extra={"user_id": uid})
         try:
             answer = premium(reply(state, raw))
+            store.set(uid, state)  # persist для Redis-backend (in-memory и так по ссылке)
         except Exception as e:
             logger.exception("reply failed: %s", e, extra={"user_id": uid})
             await msg.answer(premium(FALLBACK_ERROR_TEXT), reply_markup=kb_remove())

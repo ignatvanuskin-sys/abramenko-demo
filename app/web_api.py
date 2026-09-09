@@ -71,10 +71,33 @@ def _check_rate(session_id: str, now: float | None = None, limit: int | None = N
 def _get_state(session_id: str) -> DialogState:
     import time as _time
     if session_id not in _WEB_STORE:
-        _WEB_STORE[session_id] = DialogState()
+        # L2: подхватить пережившую рестарт сессию из Redis
+        r = _redis_client()
+        restored = None
+        if r is not None:
+            try:
+                from .session_store import load_persistent_state
+            except ImportError:
+                from session_store import load_persistent_state
+            restored = load_persistent_state(r, _REDIS_PREFIX, session_id)
+        _WEB_STORE[session_id] = restored if restored is not None else DialogState()
     _WEB_SEEN[session_id] = _time.monotonic()
     _prune_sessions()
     return _WEB_STORE[session_id]
+
+
+def _save_state(session_id: str) -> None:
+    r = _redis_client()
+    if r is None or session_id not in _WEB_STORE:
+        return
+    try:
+        from .session_store import save_persistent_state
+    except ImportError:
+        from session_store import save_persistent_state
+    save_persistent_state(r, _REDIS_PREFIX, session_id, _WEB_STORE[session_id])
+
+# Bot для admin notify — лениво, чтобы тесты не требовали токена
+_bot_instance = None
 
 def _reset_state(session_id: str) -> None:
     import time as _time
@@ -98,8 +121,24 @@ def _web_buttons_for_step(step: str) -> List[str]:
         return []  # input с placeholder, не кнопки
     return []
 
-# Bot для admin notify — лениво, чтобы тесты не требовали токена
-_bot_instance = None
+# Redis L2 для web-сессий (переживает рестарт). Без REDIS_URL — чистый in-memory.
+_REDIS_PREFIX = "web:"
+_redis = None
+_redis_tried = False
+
+def _redis_client():
+    global _redis, _redis_tried
+    if _redis_tried:
+        return _redis
+    _redis_tried = True
+    try:
+        from .session_store import get_redis_client
+    except ImportError:
+        from session_store import get_redis_client
+    _redis = get_redis_client()
+    if _redis is not None:
+        logger.info("web sessions: redis backend")
+    return _redis
 
 def _get_bot():
     global _bot_instance
@@ -162,7 +201,8 @@ except Exception as e:
 # Health
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "sessions": len(_WEB_STORE)}
+    return {"status": "ok", "sessions": len(_WEB_STORE),
+            "sessions_backend": "redis" if _redis_client() is not None else "memory"}
 
 @app.get("/api/metrics")
 def metrics():
@@ -190,12 +230,22 @@ async def _lifespan(app: FastAPI):
     import logging as _lg
     log = _lg.getLogger("abramenko.web")
     log.info(
-        "startup graph_version=%s has_telegram=%s has_llm=%s has_wa_secret=%s",
+        "startup graph_version=%s has_telegram=%s has_llm=%s has_wa_secret=%s sessions=%s",
         (os.getenv("GRAPH_API_VERSION") or "v21.0"),
         bool(os.getenv("TELEGRAM_BOT_TOKEN")),
         bool(os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")),
         bool(os.getenv("WHATSAPP_APP_SECRET")),
+        ("redis" if _redis_client() is not None else "memory"),
     )
+    try:
+        from .whatsapp import whatsapp_status
+    except ImportError:
+        from whatsapp import whatsapp_status
+    wa = whatsapp_status()
+    if wa["configured"]:
+        log.info("whatsapp transport ready (receive+send)")
+    else:
+        log.warning("whatsapp transport standby — missing: %s", ",".join(wa["missing"]))
     if (os.getenv("WHATSAPP_ALLOW_UNVERIFIED") or "") == "1":
         log.error("SECURITY: WHATSAPP_ALLOW_UNVERIFIED=1 — подпись вебхука отключена, только для локальной разработки!")
     yield
@@ -244,6 +294,7 @@ async def chat(req: ChatRequest, request: Request):
     except Exception as e:
         logger.exception("web reply failed sid=%s: %s", sid[:8], e)
         answer = "Что-то пошло не так, попробуйте ещё раз."
+    _save_state(sid)
 
     # экранируем ответ для безопасности (хотя frontend тоже escape)
     # не экранируем ботом возвращаемый текст для логики, только для ответа

@@ -78,19 +78,20 @@ def build_admin_message(state, user_id: int, username: Optional[str]) -> str:
         tg_line = f"без username\nID: {user_id}"
 
     # DEMO: если это реальные слоты — показываем подтверждённую запись
+    # Эмодзи ТОЛЬКО из таблицы владельца (app/tg_premium.py): остальные premium() вычистит.
     is_real = bool(getattr(state, "selected_slot", None))
     header = "🔔 Подтверждённая запись" if is_real else "🔔 Новая заявка"
-    master_line = f"👨‍🎨 Мастер: {master}\n" if is_real and master != "—" else ""
+    master_line = f"👤 Мастер: {master}\n" if is_real and master != "—" else ""
 
     return (
         f"{header}\n"
         "\n"
-        f"💇 Услуга: {service}\n"
+        f"🖌 Услуга: {service}\n"
         f"📍 Филиал: {branch}\n"
         f"{master_line}"
-        f"🗓 Когда: {time_str}\n"
+        f"📅 Когда: {time_str}\n"
         f"👤 Имя: {name}\n"
-        f"📞 Телефон: {phone}\n"
+        f"ℹ Телефон: {phone}\n"
         "\n"
         "Telegram:\n"
         f"{tg_line}"

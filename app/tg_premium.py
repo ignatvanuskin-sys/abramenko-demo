@@ -27,6 +27,34 @@ EMOJI_IDS: dict[str, str] = {
     "🖌": "6050679691004612757",  # Кисточка
 }
 
+
+def _load_extra_ids() -> dict[str, str]:
+    """Доп. маппинг из env TG_PREMIUM_EMOJI_EXTRA ("эмодзи:id,...").
+
+    Позволяет добавить premium-ID для новых эмодзи без изменения кода:
+    владелец присылает ID из Bot API, оператор кладёт в Railway Variables.
+    Битые пары игнорируются, код не падает.
+    """
+    import os as _os
+    extra: dict[str, str] = {}
+    raw = (_os.getenv("TG_PREMIUM_EMOJI_EXTRA") or "").strip()
+    if not raw:
+        return extra
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" not in pair:
+            continue
+        emoji, eid = pair.split(":", 1)
+        emoji, eid = emoji.strip(), eid.strip()
+        if emoji and eid.isdigit():
+            extra[emoji] = eid
+    return extra
+
+
+def emoji_ids() -> dict[str, str]:
+    """Полная таблица: владелец + env-дополнения (env побеждает при конфликте)."""
+    return {**EMOJI_IDS, **_load_extra_ids()}
+
 # Иконки для кнопок (icon_custom_emoji_id, обычных эмодзи в тексте кнопок нет)
 ICON_BRANCH = "6042011682497106307"    # 📍 Геометка
 ICON_TIME = "5890937706803894250"      # 📅 Календарь
@@ -46,10 +74,11 @@ def premium(text: str) -> str:
     """Известные эмодзи → <tg-emoji>, остальные обычные эмодзи — удалить."""
     if not text:
         return text
+    ids = emoji_ids()
     # сначала чистим несопоставленные, потом ставим теги (иначе strip съест эмодзи внутри тегов)
-    mapped = set(EMOJI_IDS)
+    mapped = set(ids)
     text = "".join(ch for ch in text if ch in mapped or not _STRIP_RE.match(ch))
-    for emoji, eid in EMOJI_IDS.items():
+    for emoji, eid in ids.items():
         if emoji in text:
             text = text.replace(emoji, f'<tg-emoji emoji-id="{eid}">{emoji}</tg-emoji>')
     text = _re.sub(r"\n +", "\n", text)

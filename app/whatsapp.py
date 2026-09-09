@@ -32,14 +32,51 @@ _MAX_BODY = 1_000_000
 
 GRAPH_VERSION_DEFAULT = "v21.0"
 
+# Redis L2 для WA-сессий (переживает рестарт). Без REDIS_URL — чистый in-memory.
+_WA_REDIS_PREFIX = "wa:"
+_wa_redis = None
+_wa_redis_tried = False
+
+def _wa_redis_client():
+    global _wa_redis, _wa_redis_tried
+    if _wa_redis_tried:
+        return _wa_redis
+    _wa_redis_tried = True
+    try:
+        from .session_store import get_redis_client
+    except ImportError:
+        from session_store import get_redis_client
+    _wa_redis = get_redis_client()
+    if _wa_redis is not None:
+        logger.info("whatsapp sessions: redis backend")
+    return _wa_redis
+
 def _get_state(wa_id: str) -> DialogState:
     import time as _time
     now = _time.monotonic()
     if wa_id not in _WA_STORE:
-        _WA_STORE[wa_id] = DialogState()
+        r = _wa_redis_client()
+        restored = None
+        if r is not None:
+            try:
+                from .session_store import load_persistent_state
+            except ImportError:
+                from session_store import load_persistent_state
+            restored = load_persistent_state(r, _WA_REDIS_PREFIX, wa_id)
+        _WA_STORE[wa_id] = restored if restored is not None else DialogState()
     _WA_SEEN[wa_id] = now
     _prune_sessions(now)
     return _WA_STORE[wa_id]
+
+def _save_state(wa_id: str) -> None:
+    r = _wa_redis_client()
+    if r is None or wa_id not in _WA_STORE:
+        return
+    try:
+        from .session_store import save_persistent_state
+    except ImportError:
+        from session_store import save_persistent_state
+    save_persistent_state(r, _WA_REDIS_PREFIX, wa_id, _WA_STORE[wa_id])
 
 def _prune_sessions(now: float | None = None) -> None:
     import time as _time
@@ -128,6 +165,7 @@ async def _process_whatsapp_message(wa_id: str, message_id: str, text: str):
     except Exception as e:
         logger.exception("whatsapp reply failed wa_id=%s: %s", wa_id, e)
         reply_text = "Что-то пошло не так, попробуйте ещё раз."
+    _save_state(wa_id)
     # Meta Send
     await _send_whatsapp_message(wa_id, reply_text)
     # admin notify если done
@@ -185,6 +223,45 @@ async def _send_whatsapp_message(wa_id: str, text: str):
             return
 
 router = APIRouter()
+
+# Какие переменные нужны для полного WhatsApp-цикла (для /api/whatsapp/status и README)
+WA_REQUIRED_VARS = ["WHATSAPP_TOKEN", "PHONE_NUMBER_ID", "WHATSAPP_VERIFY_TOKEN", "WHATSAPP_APP_SECRET"]
+
+def whatsapp_status() -> dict:
+    """Готовность WhatsApp-транспорта: что настроено, чего не хватает.
+
+    Без секретов — только флаги наличия. Используется статусом и логами старта.
+    """
+    token = (os.getenv("WHATSAPP_TOKEN") or os.getenv("WHATSAPP_ACCESS_TOKEN") or "").strip()
+    phone_id = (os.getenv("PHONE_NUMBER_ID") or "").strip()
+    verify = (os.getenv("WHATSAPP_VERIFY_TOKEN") or "").strip()
+    secret = (os.getenv("WHATSAPP_APP_SECRET") or "").strip()
+    missing = [v for v, present in [
+        ("WHATSAPP_TOKEN", bool(token)),
+        ("PHONE_NUMBER_ID", bool(phone_id)),
+        ("WHATSAPP_VERIFY_TOKEN", bool(verify)),
+        ("WHATSAPP_APP_SECRET", bool(secret)),
+    ] if not present]
+    return {
+        "configured": not missing,
+        "can_receive": bool(verify and secret),
+        "can_send": bool(token and phone_id),
+        "missing": missing,
+    }
+
+
+@router.get("/api/whatsapp/status")
+async def whatsapp_status_endpoint():
+    """Публичный статус без секретов: готов ли WhatsApp, что нужно от Марии."""
+    st = whatsapp_status()
+    out = dict(st)
+    if not st["configured"]:
+        out["how_to_enable"] = (
+            "Пришлите от WhatsApp Business: WHATSAPP_TOKEN (permanent access token), "
+            "PHONE_NUMBER_ID, WABA_ID, WHATSAPP_VERIFY_TOKEN (любая строка), "
+            "WHATSAPP_APP_SECRET (из Meta App). Инструкция — в README, раздел WhatsApp."
+        )
+    return out
 
 @router.get("/webhook/whatsapp")
 async def whatsapp_verify(request: Request):

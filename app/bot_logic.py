@@ -40,6 +40,50 @@ class DialogState:
         # приветствие отправляется один раз за сессию (для unclear без повторов)
         self.greeted = False
 
+    def to_dict(self) -> dict:
+        """Сериализация для Redis/persistent stores. Только JSON-совместимые поля."""
+        return {
+            "intent": self.intent,
+            "service": self.service,
+            "service_id": self.service_id,
+            "hair": self.hair,
+            "time_pref": self.time_pref,
+            "branch": self.branch,
+            "branch_id": self.branch_id,
+            "master_id": self.master_id,
+            "master_name": self.master_name,
+            "slots": list(self.slots or []),
+            "selected_slot": self.selected_slot,
+            "name": self.name,
+            "phone": self.phone,
+            "step": self.step,
+            "portfolio": self.portfolio,
+            "greeted": self.greeted,
+            "admin_notified": bool(getattr(self, "_admin_notified", False)),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "DialogState":
+        """Восстановление из Redis. Неизвестные/битые поля игнорируются."""
+        s = cls()
+        if not isinstance(data, dict):
+            return s
+        for key in ("intent", "service", "service_id", "hair", "time_pref",
+                    "branch", "branch_id", "master_id", "master_name",
+                    "selected_slot", "name", "phone", "step", "portfolio"):
+            if key in data:
+                setattr(s, key, data[key])
+        if isinstance(data.get("slots"), list):
+            s.slots = [x for x in data["slots"] if isinstance(x, str)][:50]
+        s.greeted = bool(data.get("greeted", False))
+        if data.get("admin_notified"):
+            s._admin_notified = True
+        if s.step not in ("start", "clarify", "clarify_hair", "portfolio", "time",
+                          "branch", "await_master", "await_date", "await_slot",
+                          "await_name", "await_phone", "done"):
+            s.step = "start"
+        return s
+
 # Категории нераспознанных: off_topic / unclear / faq_unknown / inappropriate
 OFF_TOPIC_REPLY = "Поняла 😊 Я подскажу только по вопросам Abramenko Studio. Напишите, пожалуйста, что вас интересует по услугам или записи."
 UNCLEAR_REPLY = "Не поняла, о чём речь 🙂 Хотите записаться, узнать цену или что-то ещё?"

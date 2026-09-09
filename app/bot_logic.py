@@ -11,6 +11,7 @@
 """
 import logging
 import re
+from datetime import timedelta
 from .config import BRANCHES, PRICES, SALON, UNKNOWN_ANSWER
 
 logger = logging.getLogger("abramenko.bot_logic")
@@ -30,8 +31,10 @@ class DialogState:
         self.branch_id = None
         self.master_id = None
         self.master_name = None
-        self.slots = []  # list of ISO strings
+        self.slots = []  # legacy, не используется (клиент сам называет время)
         self.selected_slot = None
+        self.pending_date = None  # YYYY-MM-DD — дата названа, ждём время
+        self.pending_time = None  # HH:MM — время названо, ждём дату
         self.name = None
         self.phone = None
         self.step = "start"
@@ -54,6 +57,8 @@ class DialogState:
             "master_name": self.master_name,
             "slots": list(self.slots or []),
             "selected_slot": self.selected_slot,
+            "pending_date": self.pending_date,
+            "pending_time": self.pending_time,
             "name": self.name,
             "phone": self.phone,
             "step": self.step,
@@ -70,7 +75,8 @@ class DialogState:
             return s
         for key in ("intent", "service", "service_id", "hair", "time_pref",
                     "branch", "branch_id", "master_id", "master_name",
-                    "selected_slot", "name", "phone", "step", "portfolio"):
+                    "selected_slot", "name", "phone", "step", "portfolio",
+                    "pending_date", "pending_time"):
             if key in data:
                 setattr(s, key, data[key])
         if isinstance(data.get("slots"), list):
@@ -275,87 +281,180 @@ def _ask_master(state) -> str:
         masters = get_masters(db, branch_id, service_id)
         db.close()
         if not masters:
-            state.step = "await_date"
-            return "На какую дату смотрим? Напишите, например, «завтра» или «на этой неделе»."
+            state.step = "await_slot"
+            return f"Понял. {TIME_QUESTION}"
         if len(masters) == 1:
             state.master_id = masters[0]["id"]
             state.master_name = masters[0]["name"]
-            state.step = "await_date"
-            return f"Мастер {masters[0]['name']} свободен. На какую дату смотрим? Например, «завтра» или конкретная дата."
+            state.step = "await_slot"
+            return f"Мастер {masters[0]['name']}. {TIME_QUESTION}"
         # несколько мастеров — спросить
         opts = " / ".join([m["name"] for m in masters[:3]])
         state.slots = []  # сброс
         state.step = "await_master"
         return f"Кто удобнее: {opts} или «неважно, кто из мастеров»? Напишите имя мастера."
     except Exception:
-        state.step = "await_date"
-        return "На какую дату смотрим? Напишите, например, «завтра» или «на этой неделе»."
+        state.step = "await_slot"
+        return TIME_QUESTION
 
-def _format_slots(slots: list) -> str:
-    # slots — ISO строки. Наивные (SQLite/Demo-БД) = локальное время филиала,
-    # с tzinfo=UTC = UTC. Показываем в TZ филиала.
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    tz = ZoneInfo("Asia/Almaty")
-    lines = []
-    for i, iso in enumerate(slots[:3], 1):
-        dt = datetime.fromisoformat(iso)
-        if dt.tzinfo is None:
-            local = dt  # уже локальное
-        else:
-            local = dt.astimezone(tz)
-        lines.append(f"{i}) {local.strftime('%d.%m %H:%M')}")
-    return "\n".join(lines)
+TIME_QUESTION = "Напишите удобные дату и время — например, «завтра в 14:00» или «в субботу утром»."
 
-def _show_slots(state) -> str:
-    # DEMO DATA — заменить на реальное расписание перед продакшеном
-    try:
-        import os
-        from datetime import date, timedelta
-        from sqlalchemy import create_engine
-        from sqlalchemy.orm import sessionmaker
-        db_url = os.getenv("DATABASE_URL")
-        if not db_url:
-            raise ValueError("no db")
-        engine = create_engine(db_url)
-        Session = sessionmaker(bind=engine)
-        db = Session()
-        # schedule_exceptions может не существовать в свежей демо-БД — не падаем
+_WEEKDAYS_RU = {
+    "понедельник": 0, "вторник": 1, "среду": 2, "среда": 2, "четверг": 3,
+    "пятницу": 4, "пятница": 4, "субботу": 5, "суббота": 5,
+    "воскресенье": 6, "воскресение": 6,
+}
+_WEEKDAYS_NOM = ["понедельник", "вторник", "среду", "четверг", "пятницу", "субботу", "воскресенье"]
+_MONTHS_RU = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5, "июня": 6,
+    "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
+}
+_DAYPARTS = [
+    ("утром", 10, 0), ("утро", 10, 0),
+    ("днём", 13, 0), ("днем", 13, 0), ("обед", 13, 0),
+    ("вечером", 18, 0), ("вечер", 18, 0),
+]
+_OPEN_HOUR, _CLOSE_HOUR = 10, 19  # салон работает 10:00–19:00
+
+
+def _parse_date_ru(t: str, today):
+    """Дата из русского текста. Возвращает date или None."""
+    from datetime import date as _date
+    if "послезавтра" in t:
+        return today + timedelta(days=2)
+    if "завтра" in t:
+        return today + timedelta(days=1)
+    if "вчера" in t:
+        return today - timedelta(days=1)
+    if "сегодня" in t:
+        return today
+    for name, wd in _WEEKDAYS_RU.items():
+        if name in t:
+            delta = (wd - today.weekday()) % 7
+            return today + timedelta(days=delta)
+    m = re.search(r"(\d{1,2})\s+([а-яё]+)", t)
+    if m:
+        month = _MONTHS_RU.get(m.group(2))
+        if month:
+            day = int(m.group(1))
+            try:
+                d = _date(today.year, month, day)
+            except ValueError:
+                return None
+            if d < today:  # дата уже прошла в этом году — следующий год
+                try:
+                    d = _date(today.year + 1, month, day)
+                except ValueError:
+                    return None
+            return d
+    m = re.search(r"(\d{1,2})[./](\d{1,2})", t)
+    if m:
+        day, month = int(m.group(1)), int(m.group(2))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            try:
+                d = _date(today.year, month, day)
+            except ValueError:
+                return None
+            if d < today:
+                try:
+                    d = _date(today.year + 1, month, day)
+                except ValueError:
+                    return None
+            return d
+    return None
+
+
+def _parse_time_ru(t: str):
+    """Время из русского текста. Возвращает (hour, minute) или None."""
+    m = re.search(r"(\d{1,2})[:.](\d{2})", t)
+    if m:
+        h, mi = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= mi <= 59:
+            return (h, mi)
+    m = re.search(r"(?:в|к)\s+(\d{1,2})(?:\s*(?:час|ч\b))?", t)
+    if m:
+        h = int(m.group(1))
+        if 0 <= h <= 23:
+            return (h, 0)
+    m = re.search(r"(\d{1,2})\s*час", t)
+    if m:
+        h = int(m.group(1))
+        if 0 <= h <= 23:
+            return (h, 0)
+    for word, h, mi in _DAYPARTS:
+        if word in t:
+            return (h, mi)
+    return None
+
+
+def _format_client_time(d, h: int, mi: int) -> str:
+    """Красиво для клиента: «завтра в 14:00», «в субботу в 13:00», «12.09 в 14:00»."""
+    from datetime import date as _date
+    today = _date.today()
+    delta = (d - today).days
+    time_s = f"{h:02d}:{mi:02d}"
+    if delta == 0:
+        return f"сегодня в {time_s}"
+    if delta == 1:
+        return f"завтра в {time_s}"
+    if delta == 2:
+        return f"послезавтра в {time_s}"
+    if 0 < delta < 7:
+        return f"в {_WEEKDAYS_NOM[d.weekday()]} в {time_s}"
+    return f"{d.strftime('%d.%m')} в {time_s}"
+
+
+def _handle_time_input(state, text: str) -> str:
+    """Клиент сам называет удобные дату и время (свободный ввод, не окна).
+
+    Возвращает ответ. При полном datetime ставит selected_slot (ISO, Almaty)
+    и ведёт на await_name, иначе уточняет недостающее.
+    """
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    low = text.strip().lower()
+
+    # «неважно» про время — просим конкретику
+    if low in ("неважно", "любое", "когда угодно", "когда удобно"):
+        return "Подскажите хотя бы примерно — например, «завтра в 14:00» или «в субботу утром»."
+
+    now = _dt.now(_ZI("Asia/Almaty"))
+    today = now.date()
+    d = _parse_date_ru(low, today) or (
+        _dt.strptime(state.pending_date, "%Y-%m-%d").date()
+        if getattr(state, "pending_date", None) else None)
+    tm = _parse_time_ru(low)
+    if tm is None and getattr(state, "pending_time", None):
         try:
-            db.query(ScheduleException).all()
+            _h, _m = state.pending_time.split(":")
+            tm = (int(_h), int(_m))
         except Exception:
-            db.rollback()
-        b_id = getattr(state, "branch_id", None) or 1
-        s_id = getattr(state, "service_id", None) or 1
-        m_id = getattr(state, "master_id", None)
-        if not m_id:
-            # любой мастер — берём первого для услуги/филиала
-            from .booking_tools import get_masters
-            masters = get_masters(db, b_id, s_id)
-            if masters:
-                m_id = masters[0]["id"]
-                state.master_id = m_id
-                state.master_name = masters[0]["name"]
-            else:
-                m_id = 1
-        date_from = date.today()
-        date_to = date_from + timedelta(days=7)
-        from .booking import get_available_slots
-        import os as _os
-        buf = int(_os.getenv("BUFFER_MINUTES", "15"))
-        slots = get_available_slots(db, b_id, m_id, s_id, date_from, date_to, buffer_minutes=buf)
-        db.close()
-        if not slots:
-            return "К сожалению, свободных окон на ближайшие 7 дней нет. Напишите другую дату или филиал."
-        # сохраняем как ISO в ЛОКАЛЬНОМ времени филиала — клиент выбирает именно его
-        from zoneinfo import ZoneInfo
-        _tz_local = ZoneInfo("Asia/Almaty")
-        state.slots = [s.astimezone(_tz_local).isoformat() for s in slots[:3]]
-        who = f"У мастера {state.master_name} " if getattr(state, "master_name", None) else ""
-        return f"{who}свободные окна:\n{_format_slots(state.slots)}\nНапишите 1, 2 или 3 чтобы выбрать."
-    except Exception as e:
-        logger.warning("show_slots failed: %s", e)
-        return "Не удалось загрузить слоты. Напишите желаемую дату (например, «завтра»)."
+            tm = None
+
+    if d is not None and tm is not None:
+        h, mi = tm
+        if h < _OPEN_HOUR or h >= _CLOSE_HOUR + 1:
+            state.pending_date, state.pending_time = None, None
+            return (f"Салон работает с {_OPEN_HOUR}:00 до {_CLOSE_HOUR}:00. "
+                    f"Назовите время внутри — например, «завтра в 14:00».")
+        want = _dt(d.year, d.month, d.day, h, mi, tzinfo=_ZI("Asia/Almaty"))
+        if want <= now:
+            state.pending_date, state.pending_time = None, None
+            return "Это время уже прошло. Назовите другое — например, «завтра в 14:00»."
+        state.pending_date, state.pending_time = None, None
+        state.selected_slot = want.isoformat()
+        state.time_pref = _format_client_time(d, h, mi)
+        state.slots = []
+        state.step = "await_name"
+        return f"Отлично, {state.time_pref}. Как вас зовут?"
+    if d is not None:
+        state.pending_date = d.isoformat()
+        day_s = _format_client_time(d, 0, 0).rsplit(" в ", 1)[0]
+        return f"Хорошо, {day_s}. А во сколько удобно? Например, «в 14:00»."
+    if tm is not None:
+        state.pending_time = f"{tm[0]:02d}:{tm[1]:02d}"
+        return f"Понял, в {state.pending_time}. А на какой день? Например, «завтра»."
+    return TIME_QUESTION
 
 
 def faq_answer(text: str):
@@ -595,13 +694,13 @@ def reply(state: DialogState, user_text: str) -> str:
                     local = appt.starts_at.astimezone(_ZI("Asia/Almaty"))
                 state.step = "done"
                 name = state.name or "Клиент"
-                return f"Вы записаны, {name}! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Ждём вас!".strip()
+                return f"Вы записаны, {name}! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Администратор перезвонит для подтверждения.".strip()
             except ValueError as e:
                 if "занят" in str(e):
                     state.selected_slot = None
                     state.slots = []
                     state.step = "await_slot"
-                    return f"Извините, это время уже заняли, пока вы выбирали. {_show_slots(state)}"
+                    return "Извините, это время уже заняли. Назовите другое удобное — например, «завтра в 15:00»."
                 logger.exception("booking create failed: %s", e)
                 state.step = "done"
                 name = state.name or "Клиент"
@@ -614,10 +713,15 @@ def reply(state: DialogState, user_text: str) -> str:
         if state.name and state.intent:
             closing = CLOSINGS.get(state.intent, CLOSINGS["booking"])
             state.step = "done"
+            # booking: клиент сам назвал время — подтверждаем его текстом
+            if state.intent == "booking" and getattr(state, "time_pref", None):
+                return f"Принял, {state.name}. Записал: {state.time_pref} — {closing}"
             return f"Принял, {state.name}. {closing}"
         if state.step == "await_phone":
             name = state.name or ""
             state.step = "done"
+            if state.intent == "booking" and getattr(state, "time_pref", None):
+                return f"Принял, {name}. Записал: {state.time_pref} — {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
             return f"Принял, {name}. {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
 
     # 0.5 inappropriate — оскорбления/провокации: не уточнять смысл, не повторять слова, без state
@@ -636,7 +740,7 @@ def reply(state: DialogState, user_text: str) -> str:
         return OFF_TOPIC_REPLY
 
     # 1. FAQ — только если это похоже на вопрос, и не перебиваем слоты время/филиал/имя/телефон
-    if state.step in ("time", "branch", "await_name", "await_phone", "clarify_hair", "portfolio"):
+    if state.step in ("time", "branch", "await_master", "await_slot", "await_name", "await_phone", "clarify_hair", "portfolio"):
         fa = faq_answer(text) if _looks_like_question(text) else None
         if fa:
             if "Какой филиал вам удобнее?" in fa:
@@ -899,14 +1003,13 @@ def reply(state: DialogState, user_text: str) -> str:
         state.step = "await_name"
         return "Хорошо. Как вас зовут?"
 
-    # 5.1 Мастер
+    # 5.1 Мастер — клиент выбирает мастера, время называет сам
     if state.step == "await_master":
-        # выбор мастера — текст или "неважно"
         sel = text.strip().lower()
         if "неважно" in sel or "любой" in sel:
-            # оставляем master_id как None — выберем первого доступного при показе слотов
+            # мастер не важен — оставляем master_id как None
             pass
-        elif state.master_id is None and not any(w in sel for w in ["сегодня", "завтра", "послезавтра", "недел", "числ", "числа", "числу"]):
+        elif state.master_id is None:
             # пробуем найти мастера по имени
             try:
                 import os
@@ -927,60 +1030,44 @@ def reply(state: DialogState, user_text: str) -> str:
             except Exception:
                 pass
             if state.master_id is None and not is_training_relevant(sel):
-                # не распознали имя мастера, это не дата и не услуга — переспросим вежливо
-                return "Напишите имя мастера (например, «Анна»), «неважно, кто из мастеров» или дату (например, «завтра»)."
-            # дата вместо имени мастера — переходим в await_date
-            if state.master_id is None and any(w in sel for w in ["сегодня", "завтра", "послезавтра", "недел"]):
-                state.step = "await_date"
-                state.time_pref = sel
-                return _show_slots(state)
-        # показываем слоты
+                # может, клиент сразу написал дату/время вместо имени —
+                # пробуем разобрать как время, мастер останется «любой»
+                if _parse_date_ru(sel, __import__("datetime").date.today()) is not None or _parse_time_ru(sel) is not None:
+                    state.step = "await_slot"
+                    return _handle_time_input(state, text)
+                return "Напишите имя мастера (например, «Анна») или «неважно, кто из мастеров»."
+        # мастер определён — клиент сам называет удобные дату и время
         state.step = "await_slot"
-        return _show_slots(state)
+        # если в том же сообщении уже есть дата/время — разбираем сразу
+        if _parse_date_ru(sel, __import__("datetime").date.today()) is not None or _parse_time_ru(sel) is not None:
+            return _handle_time_input(state, text)
+        return TIME_QUESTION
 
-    # 5.1b Дата (когда мастер один / слоты ещё не показаны)
-    if state.step == "await_date":
-        state.time_pref = text
-        # показываем реальные слоты
-        state.step = "await_slot"
-        return _show_slots(state)
-
-    # 5.2 Слоты — выбор
-    if state.step == "await_slot":
-        # если слотов нет — просим дату
-        if not state.slots:
-            state.step = "await_slot"
-            return _show_slots(state)
-        # парсим выбор 1/2/3
-        choice = text.strip()
-        idx = None
-        if choice in ["1", "2", "3", "1)", "2)", "3)"]:
-            idx = int(choice[0]) - 1
-        else:
-            import re as _re
-            m = _re.search(r"(\d{1,2}[:.]\d{2})", choice)
-            if m and state.slots:
-                for i, iso in enumerate(state.slots):
-                    if m.group(1).replace(".", ":") in iso:
-                        idx = i
-                        break
-            if "перв" in low:
-                idx = 0
-            elif "втор" in low:
-                idx = 1
-            elif "трет" in low:
-                idx = 2
-        if idx is not None and 0 <= idx < len(state.slots):
-            state.selected_slot = state.slots[idx]
-            if state.name:
-                state.step = "await_phone"
-                return f"{state.name}, какой номер для связи — администратор перезвонит?"
-            state.step = "await_name"
-            return "Хорошо. Как вас зовут?"
-        if state.slots:
-            return f"Выберите вариант:\n{_format_slots(state.slots)}\nНапишите 1, 2 или 3."
-        state.step = "await_name"
-        return "Хорошо. Как вас зовут?"
+    # 5.2 Время — клиент сам называет удобные дату и время
+    if state.step in ("await_date", "await_slot"):
+        # имя мастера вместо времени — подхватить и переспросить время
+        if state.master_id is None:
+            try:
+                import os as _os2
+                db_url = _os2.getenv("DATABASE_URL")
+                if db_url:
+                    from sqlalchemy import create_engine as _ce
+                    from sqlalchemy.orm import sessionmaker as _sm
+                    from .models import Master as _M
+                    _eng = _ce(db_url)
+                    _S = _sm(bind=_eng)
+                    _db = _S()
+                    for m in _db.query(_M).all():
+                        if m.name.lower() in text.strip().lower():
+                            state.master_id = m.id
+                            state.master_name = m.name
+                            break
+                    _db.close()
+                    if state.master_id is not None and _parse_time_ru(text.strip().lower()) is None and _parse_date_ru(text.strip().lower(), __import__("datetime").date.today()) is None:
+                        return f"Хорошо, мастер {state.master_name}. {TIME_QUESTION}"
+            except Exception:
+                pass
+        return _handle_time_input(state, text)
 
     # 6. Имя
     if state.step == "await_name":
@@ -1028,22 +1115,24 @@ def reply(state: DialogState, user_text: str) -> str:
                     # форматируем для клиента
                     local = appt.starts_at.astimezone(ZoneInfo("Asia/Almaty")) if appt.starts_at.tzinfo else appt.starts_at
                     state.step = "done"
-                    return f"Вы записаны! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Ждём вас!".strip()
+                    return f"Вы записаны! {local.strftime('%d.%m %H:%M')} — {state.branch or ''} {getattr(state, 'master_name', '') or ''}. Администратор перезвонит для подтверждения.".strip()
                 except ValueError as e:
                     if "занят" in str(e):
-                        # гонка — показываем новые слоты
+                        # гонка — клиент называет другое время сам
                         state.selected_slot = None
                         state.step = "await_slot"
                         # сбросим слоты
                         state.slots = []
-                        return f"Извините, это время уже заняли, пока вы выбирали. {_show_slots(state)}"
+                        return "Извините, это время уже заняли. Назовите другое удобное — например, «завтра в 15:00»."
                     raise
                 except Exception:
                     # fallback к старой логике
                     state.step = "done"
                     return f"Принял, {state.name}. {CLOSINGS.get(state.intent, CLOSINGS['booking'])}"
             state.step = "done"
-            return f"Принял, {state.name}. {CLOSINGS.get(state.intent, CLOSINGS['booking'])}"
+            if getattr(state, "time_pref", None):
+                return f"Принял, {state.name}. Записал: {state.time_pref} — {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
+            return f"Принял, {state.name}. {CLOSINGS.get(state.intent or 'booking', CLOSINGS['booking'])}"
         return "Напишите номер в формате +7 ___ ___ __ __ — передам администратору."
 
     if state.step == "done":
@@ -1090,6 +1179,10 @@ def _follow_question(state: DialogState) -> str:
         return "Вам удобнее в будни или в выходные?"
     if state.step == "branch":
         return "Какой филиал удобнее — Букетова или Жамбыла?"
+    if state.step == "await_master":
+        return "Напишите имя мастера или «неважно»."
+    if state.step in ("await_date", "await_slot"):
+        return TIME_QUESTION
     if state.step == "await_name":
         return "Как вас зовут?"
     if state.step == "await_phone":

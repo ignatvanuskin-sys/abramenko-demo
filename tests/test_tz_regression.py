@@ -36,16 +36,18 @@ def test_tz_slot_shown_equals_confirmed_and_admin(monkeypatch, tmp_path):
     s = DialogState()
     reply(s, 'хочу балаяж')
     reply(s, 'окрашены')
-    reply(s, 'Жамбыла')
-    reply(s, 'Анна')
-    reply(s, 'завтра')
-    shown_iso = s.slots[0]
-    # локальное время слота, показанное клиенту: 10:00
+    r_branch = reply(s, 'Жамбыла')
+    # клиент сам называет время — никаких окон
+    assert "свободные окна" not in r_branch.lower()
+    r_time = reply(s, 'завтра в 10:00')
+    assert s.step == "await_name", r_time
+    shown_iso = s.selected_slot
+    # названное клиентом время сохранено как локальное Almaty
     shown_local = datetime.fromisoformat(shown_iso).astimezone(
         __import__('zoneinfo').ZoneInfo("Asia/Almaty")).strftime('%d.%m %H:%M')
     expected_time = shown_local.split(' ')[1]  # "10:00"
+    assert expected_time == "10:00"
 
-    reply(s, '1')
     reply(s, 'Тест E2E')
     client_final = reply(s, '+7 707 000 00 09')
 

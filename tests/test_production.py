@@ -268,15 +268,15 @@ def test_master_step_in_booking(monkeypatch):
     reply(s, "хочу балаяж")
     reply(s, "окрашены")
     r_branch = reply(s, "Жамбыла")
-    # реальные слоты: один мастер → сразу дата, или список мастеров; НЕ «будни или выходные»
+    # клиент сам называет время: один мастер → сразу вопрос даты/времени; НЕ «будни или выходные», НЕ окна
     assert "будни или выходные" not in r_branch
-    # выбор мастера (несколько) или дата (один мастер)
-    assert "мастер" in r_branch.lower() or "дату" in r_branch.lower()
-    # «завтра» на шаге мастера → дата → показываются конкретные часы
-    r_master = reply(s, "завтра")
-    assert "свободные окна" in r_master.lower() and "10:00" in r_master, r_master
-    # выбор слота -> имя -> телефон -> appointment в БД
-    reply(s, "1")
+    assert "свободные окна" not in r_branch.lower()
+    assert "дату и время" in r_branch.lower()
+    # «завтра в 10:00» → сразу имя, без выбора номеров
+    r_time = reply(s, "завтра в 10:00")
+    assert s.step == "await_name", r_time
+    assert "зовут" in r_time.lower()
+    # имя -> телефон -> appointment в БД
     reply(s, "Айгерим")
     r_final = reply(s, "+7 707 123 45 67")
     assert "записаны" in r_final.lower()

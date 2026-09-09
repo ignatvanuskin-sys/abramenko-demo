@@ -35,6 +35,7 @@ class DialogState:
         self.selected_slot = None
         self.pending_date = None  # YYYY-MM-DD — дата названа, ждём время
         self.pending_time = None  # HH:MM — время названо, ждём дату
+        self.history = []  # [{"role": "user"|"assistant", "text": ...}] — контекст для LLM-драйвера
         self.name = None
         self.phone = None
         self.step = "start"
@@ -59,6 +60,7 @@ class DialogState:
             "selected_slot": self.selected_slot,
             "pending_date": self.pending_date,
             "pending_time": self.pending_time,
+            "history": [h for h in (self.history or []) if isinstance(h, dict)][:8],
             "name": self.name,
             "phone": self.phone,
             "step": self.step,
@@ -79,6 +81,10 @@ class DialogState:
                     "pending_date", "pending_time"):
             if key in data:
                 setattr(s, key, data[key])
+        if isinstance(data.get("history"), list):
+            s.history = [h for h in data["history"]
+                         if isinstance(h, dict) and h.get("role") in ("user", "assistant")
+                         and isinstance(h.get("text"), str)][:8]
         if isinstance(data.get("slots"), list):
             s.slots = [x for x in data["slots"] if isinstance(x, str)][:50]
         s.greeted = bool(data.get("greeted", False))
@@ -618,6 +624,345 @@ def _is_inside_booking_flow(state) -> bool:
     return state.intent is not None and state.step not in ("start", "done")
 
 
+def _llm_should_drive() -> bool:
+    """ИИ ведёт диалог, если настроен ключ. Иначе — rule-based fallback."""
+    try:
+        from .llm_client import llm_available
+    except Exception:
+        return False
+    try:
+        return bool(llm_available())
+    except Exception:
+        return False
+
+
+def _llm_chat(messages: list, max_tokens: int = 300) -> str:
+    """Шов для тестов: весь LLM-трафик бота идёт отсюда."""
+    from .llm_client import llm_reply
+    return llm_reply(messages, temperature=0.3, max_tokens=max_tokens)
+
+
+def _push_history(state, role: str, text: str) -> None:
+    try:
+        hist = getattr(state, "history", None)
+        if not isinstance(hist, list):
+            state.history = hist = []
+        hist.append({"role": role, "text": (text or "")[:500]})
+        if len(hist) > 8:
+            del hist[:len(hist) - 8]
+    except Exception:
+        pass
+
+
+def _missing_fields(state) -> list:
+    """Чего не хватает до заявки. Считаем детерминированно, не доверяем LLM."""
+    if getattr(state, "step", None) == "done":
+        return []
+    intent = getattr(state, "intent", None) or "booking"
+    if intent == "booking":
+        need = []
+        if not getattr(state, "service", None):
+            need.append("service")
+        if not getattr(state, "branch", None):
+            need.append("branch")
+        if not getattr(state, "selected_slot", None) and not getattr(state, "time_pref", None):
+            need.append("time")
+        if not getattr(state, "name", None):
+            need.append("name")
+        if not getattr(state, "phone", None):
+            need.append("phone")
+        return need
+    need = []
+    if not getattr(state, "service", None):
+        need.append("service")
+    if not getattr(state, "name", None):
+        need.append("name")
+    if not getattr(state, "phone", None):
+        need.append("phone")
+    return need
+
+
+_BRANCH_LABELS = {"buketova": "Букетова 61", "madame": "Жамбыла 127"}
+
+
+def _apply_driver_fields(state, data: dict) -> None:
+    """Применяет извлечённые LLM поля. Всё валидируем детерминированно."""
+    if not isinstance(data, dict):
+        return
+    intent = data.get("intent")
+    if intent in ("booking", "vacancy", "model", "training") and not getattr(state, "intent", None):
+        state.intent = intent
+    if not getattr(state, "intent", None):
+        state.intent = "booking"
+    svc = data.get("service")
+    if svc and isinstance(svc, str) and not getattr(state, "service", None):
+        svc = svc.strip()[:80]
+        if len(svc) >= 2:
+            state.service = svc
+    br = data.get("branch")
+    if br in _BRANCH_LABELS and not getattr(state, "branch", None):
+        state.branch = _BRANCH_LABELS[br]
+    ct = data.get("client_time")
+    if ct and isinstance(ct, str) and not getattr(state, "selected_slot", None):
+        _apply_client_time_text(state, ct)
+    nm = data.get("name")
+    if nm and isinstance(nm, str) and not getattr(state, "name", None):
+        nm = re.sub(r"[^\wа-яё\- ]", "", nm, flags=re.IGNORECASE).strip().split()[0][:30]
+        if re.fullmatch(r"[А-ЯЁA-Z][а-яёa-z\-]{1,29}", nm or ""):
+            state.name = nm[0].upper() + nm[1:]
+    # шаг держим в sync с прогрессом для транспортов/метрик
+    # (done ставит только финализация в _llm_drive — иначе она пропустится)
+    if getattr(state, "step", None) in ("start", "clarify", "time", "branch",
+                                        "await_master", "await_date", "await_slot",
+                                        "await_name", "await_phone"):
+        need = _missing_fields(state)
+        if need:
+            state.step = {"service": "clarify", "branch": "branch", "time": "await_slot",
+                          "name": "await_name", "phone": "await_phone"}.get(need[0], state.step)
+
+
+def _apply_client_time_text(state, text: str) -> bool:
+    """Разбирает свободный текст времени в selected_slot/time_pref. True если полное."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo as _ZI
+    low = (text or "").strip().lower()
+    if not low:
+        return False
+    now = _dt.now(_ZI("Asia/Almaty"))
+    today = now.date()
+    d = _parse_date_ru(low, today)
+    if d is None and getattr(state, "pending_date", None):
+        try:
+            d = _dt.strptime(state.pending_date, "%Y-%m-%d").date()
+        except Exception:
+            d = None
+    tm = _parse_time_ru(low)
+    if tm is None and getattr(state, "pending_time", None):
+        try:
+            _h, _m = state.pending_time.split(":")
+            tm = (int(_h), int(_m))
+        except Exception:
+            tm = None
+    if d is not None and tm is not None:
+        h, mi = tm
+        if h < _OPEN_HOUR or h >= _CLOSE_HOUR + 1:
+            return False
+        want = _dt(d.year, d.month, d.day, h, mi, tzinfo=_ZI("Asia/Almaty"))
+        if want <= now:
+            return False
+        state.pending_date, state.pending_time = None, None
+        state.selected_slot = want.isoformat()
+        state.time_pref = _format_client_time(d, h, mi)
+        return True
+    if d is not None and getattr(state, "pending_time", None):
+        return _apply_client_time_text(state, f"{state.pending_time}")
+    if d is not None:
+        state.pending_date = d.isoformat()
+    if tm is not None:
+        state.pending_time = f"{tm[0]:02d}:{tm[1]:02d}"
+    return False
+
+
+def _resolve_ids(state) -> None:
+    """Подтягивает branch_id/service_id/master_id из БД по текстовым полям (best-effort)."""
+    try:
+        import os
+        db_url = (os.getenv("DATABASE_URL") or "").strip()
+        if not db_url:
+            return
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        try:
+            from .models import Branch, Master, Service
+        except ImportError:
+            from models import Branch, Master, Service
+        engine = create_engine(db_url)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        try:
+            if not getattr(state, "branch_id", None) and getattr(state, "branch", None):
+                for b in db.query(Branch).all():
+                    if (b.name or "") in (state.branch or "") or (b.address or "") in (state.branch or ""):
+                        state.branch_id = b.id
+                        break
+            if not getattr(state, "service_id", None) and getattr(state, "service", None):
+                for s in db.query(Service).all():
+                    if (s.name or "").lower() in (state.service or "").lower():
+                        state.service_id = s.id
+                        break
+                if not getattr(state, "service_id", None):
+                    first = db.query(Service).first()
+                    if first:
+                        state.service_id = first.id
+            if not getattr(state, "master_id", None) and getattr(state, "master_name", None):
+                for m in db.query(Master).all():
+                    if (m.name or "").lower() in (state.master_name or "").lower():
+                        state.master_id = m.id
+                        break
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("resolve_ids failed: %s", e)
+
+
+def _create_appointment_now(state):
+    """Создаёт appointment из selected_slot. Возвращает (status, local_str).
+
+    status: "ok" | "busy" | "skip" (нет БД/слота — заявка всё равно идёт админу текстом).
+    """
+    if not _use_real_booking() or getattr(state, "intent", None) != "booking":
+        return ("skip", None)
+    if not getattr(state, "selected_slot", None):
+        return ("skip", None)
+    try:
+        import os
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from dateutil.parser import isoparse
+        from zoneinfo import ZoneInfo as _ZI
+        _resolve_ids(state)
+        db_url = (os.getenv("DATABASE_URL") or "").strip()
+        engine = create_engine(db_url)
+        Session = sessionmaker(bind=engine)
+        db = Session()
+        try:
+            b_id = getattr(state, "branch_id", 1) or 1
+            s_id = getattr(state, "service_id", 1) or 1
+            m_id = getattr(state, "master_id", None)
+            if not m_id:
+                try:
+                    from .booking_tools import get_masters
+                except ImportError:
+                    from booking_tools import get_masters
+                masters = get_masters(db, b_id, s_id)
+                if masters:
+                    m_id = masters[0]["id"]
+                    state.master_id = m_id
+            starts_at = isoparse(state.selected_slot).replace(tzinfo=None).replace(tzinfo=_ZI("Asia/Almaty"))
+            try:
+                from .booking import create_booking as _create
+            except ImportError:
+                from booking import create_booking as _create
+            appt = _create(db, b_id, m_id, s_id, state.name or "Клиент",
+                           state.phone or "", starts_at)
+            db.commit()
+            local = appt.starts_at if appt.starts_at.tzinfo is None else appt.starts_at.astimezone(_ZI("Asia/Almaty"))
+            if local.tzinfo is None:
+                local = local.replace(tzinfo=_ZI("Asia/Almaty"))
+            return ("ok", local.strftime("%d.%m %H:%M"))
+        finally:
+            db.close()
+    except ValueError as e:
+        if "занят" in str(e):
+            return ("busy", None)
+        logger.exception("appointment create failed: %s", e)
+        return ("skip", None)
+    except Exception as e:
+        logger.exception("appointment create crashed: %s", e)
+        return ("skip", None)
+
+
+def _llm_closing(state, appt_local: str | None) -> str:
+    """Живое подтверждение заявки от ИИ по фактам. Fallback — детерминированный текст."""
+    facts = {
+        "услуга": getattr(state, "service", None) or "—",
+        "филиал": getattr(state, "branch", None) or "—",
+        "мастер": getattr(state, "master_name", None) or "любой свободный",
+        "время": appt_local or getattr(state, "time_pref", None) or getattr(state, "selected_slot", None) or "—",
+        "имя": getattr(state, "name", None) or "—",
+    }
+    try:
+        msg = ("Подтверди запись клиента тепло и коротко (1-2 предложения, по-русски), "
+               "используй ТОЛЬКО эти факты, ничего не выдумывай, "
+               "в конце добавь что администратор перезвонит для подтверждения. "
+               f"ФАКТЫ: {facts}")
+        out = _llm_chat([{"role": "user", "content": msg}], max_tokens=150)
+        if out and len(out.strip()) >= 10:
+            return out.strip()
+    except Exception as e:
+        logger.warning("llm closing failed, deterministic fallback: %s", e)
+    name = getattr(state, "name", None) or "Клиент"
+    when = appt_local or getattr(state, "time_pref", None) or ""
+    return f"Вы записаны, {name}! {when} — {state.branch or ''}. Администратор перезвонит для подтверждения.".strip()
+
+
+_LLM_DRIVER_RULES = (
+    "Ты — администратор салона красоты Abramenko Studio (Петропавловск), ведёшь живую переписку. "
+    "Отвечай СТРОГО JSON без markdown: {\"reply\": \"твой ответ клиенту\", "
+    "\"intent\": \"booking|vacancy|model|training|null\", \"service\": \"услуга или null\", "
+    "\"branch\": \"buketova|madame|null\", \"client_time\": \"сырой кусок про дату/время из сообщений или null\", "
+    "\"name\": \"имя или null\"}. "
+    "Правила reply (по-русски, тепло, 1-2 предложения, ровно один вопрос): "
+    "учитывай ВСЮ историю — не переспрашивай то, что уже сказано; "
+    "если клиент повторяет/уточняет — реагируй на повтор осмысленно, а не шаблоном; "
+    "собирай по порядку: услуга → филиал → дата/время → имя → телефон (телефон проси ПОСЛЕДНИМ); "
+    "время клиент называет сам — никогда не предлагай окна/номера; "
+    "цены и факты — только из системного промпта, нет факта — «Уточню у администратора»; "
+    "не подтверждай запись сам (это сделает система); "
+    "оффтоп (пицца, вуз, политика) — вежливо верни к салону одной фразой."
+)
+
+
+def _llm_drive(state, user_text: str) -> str:
+    """ИИ ведёт диалог: ответ + извлечение полей + детерминированная финализация."""
+    import json as _json
+    need = _missing_fields(state)
+    hist_lines = []
+    for h in (getattr(state, "history", None) or [])[-6:]:
+        who = "Клиент" if h.get("role") == "user" else "Админ"
+        hist_lines.append(f"{who}: {h.get('text', '')}")
+    hist_lines.append(f"Клиент: {user_text}")
+    collected = {
+        "intent": getattr(state, "intent", None),
+        "service": getattr(state, "service", None),
+        "branch": getattr(state, "branch", None),
+        "time": getattr(state, "time_pref", None) or getattr(state, "selected_slot", None),
+        "name": getattr(state, "name", None),
+        "phone": "***" if getattr(state, "phone", None) else None,
+    }
+    content = (_LLM_DRIVER_RULES
+               + f"\n[УЖЕ СОБРАНО: {collected}] [НЕ ХВАТАЕТ: {need or 'всё собрано'}]"
+               + "\n[ДИАЛОГ:\n" + "\n".join(hist_lines) + "]")
+    raw = _llm_chat([{"role": "user", "content": content}], max_tokens=350)
+    data = None
+    reply_text = None
+    try:
+        start, end = raw.find("{"), raw.rfind("}")
+        if start != -1 and end > start:
+            data = _json.loads(raw[start:end + 1])
+            reply_text = (data.get("reply") or "").strip()
+    except Exception:
+        data = None
+    if not reply_text:
+        # сырой текст лучше шаблона — отдаём как есть, поля извлекаем детерминированно
+        reply_text = raw.strip()[:1000] or "Поняла вас. Расскажите подробнее?"
+        data = {}
+    _apply_driver_fields(state, data if isinstance(data, dict) else {})
+    # телефон/имя из сырого текста пользователя — детерминированно (LLM может пропустить)
+    if not getattr(state, "phone", None):
+        pm = PHONE_RE.search(user_text or "")
+        if pm:
+            state.phone = pm.group(0)
+    _push_history(state, "user", user_text)
+    # всё собрано — финализируем детерминированно, текст закрытия живой
+    need_after = _missing_fields(state)
+    if not need_after and getattr(state, "step", None) != "done":
+        status, local = _create_appointment_now(state)
+        if status == "busy":
+            state.selected_slot = None
+            state.step = "await_slot"
+            out = ("Это время уже заняли, извините. "
+                   "Назовите другое удобное — например, «завтра в 15:00».")
+            _push_history(state, "assistant", out)
+            return out
+        state.step = "done"
+        out = _llm_closing(state, local)
+        _push_history(state, "assistant", out)
+        return out
+    _push_history(state, "assistant", reply_text)
+    return reply_text
+
+
 def _try_llm_fallback(state, user_text: str):
     """Пытается ответить через LLM, если доступен. Иначе None."""
     # только если FAQ и intent is None и не в booking flow
@@ -656,6 +1001,12 @@ def reply(state: DialogState, user_text: str) -> str:
     m = PHONE_RE.search(text)
     if m and not state.phone:
         state.phone = m.group(0)
+        # ИИ ведёт — финализация через драйвер (живой текст закрытия)
+        if _llm_should_drive():
+            try:
+                return _llm_drive(state, text)
+            except Exception as e:
+                logger.exception("llm drive failed on phone, deterministic finalize: %s", e)
         # реальные слоты — создаём запись транзакционно до любого ответа
         if _use_real_booking() and state.intent == "booking" and state.selected_slot:
             try:
@@ -734,6 +1085,14 @@ def reply(state: DialogState, user_text: str) -> str:
             return UNCLEAR_REPLY
         state.greeted = True
         return GREETING_FULL
+
+    # 0.65 ИИ-драйвер: весь диалог ведёт LLM с историей и фактами салона.
+    # Шаблоны ниже — только fallback, когда ключа нет или LLM упал.
+    if _llm_should_drive():
+        try:
+            return _llm_drive(state, text)
+        except Exception as e:
+            logger.exception("llm drive failed, rule-based fallback: %s", e)
 
     # 0.7 off_topic защита — до FAQ и intent, не меняем state и не собираем лид
     if is_off_topic(text, state):

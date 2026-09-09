@@ -94,15 +94,28 @@ def test_llm_unavailable_no_crash(monkeypatch):
     assert isinstance(r, str)
 
 def test_booking_llm_does_not_change_state(monkeypatch):
+    # ИИ ведёт диалог: JSON применяет, мусор — отдаёт текстом не ломая состояние
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    import json as _json
     s = DialogState()
-    reply(s, "хочу балаяж")
-    assert s.intent == "booking"
-    assert s.step == "clarify_hair"
-    # LLM не должен менять booking state
+    with patch("app.llm_client._call_openai_compatible",
+               return_value=_json.dumps({"reply": "Конечно! Какая услуга интересует?",
+                                         "intent": "booking", "service": None,
+                                         "branch": None, "client_time": None, "name": None})):
+        r = reply(s, "хочу записаться")
+        assert "услуга" in r.lower(), r
+        assert s.intent == "booking"
+    # повтор «хочу записаться» — осмысленно, НЕ шаблон про будни/выходные
+    with patch("app.llm_client._call_openai_compatible",
+               return_value=_json.dumps({"reply": "Поняла, записываемся! Так какая услуга — окрашивание, стрижка, ногти?",
+                                         "intent": "booking", "service": None,
+                                         "branch": None, "client_time": None, "name": None})):
+        r2 = reply(s, "хочу записаться")
+        assert "будни или выходные" not in r2.lower(), r2
+    # мусор вместо JSON — сырой текст клиенту, состояние цело
     with patch("app.llm_client._call_openai_compatible", return_value="LLM hallucination"):
-        r = reply(s, "окрашены")
-        assert s.step == "time"
+        r3 = reply(s, "окрашены")
+        assert r3 == "LLM hallucination"
         assert s.intent == "booking"
 
 def test_provider_abstraction_groq():

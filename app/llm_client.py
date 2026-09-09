@@ -157,7 +157,8 @@ def _call_openai_compatible(cfg: Dict[str, str], messages: List[Dict[str, str]],
     logger.info("llm raw response len=%d text=%r", len(content or ""), (content or "")[:2000])
     return (content or "").strip()
 
-def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
+def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2,
+            max_tokens: Optional[int] = None) -> str:
     """Основной вызов с failover. Никогда не должен вешать WhatsApp webhook."""
     # ограничим контекст: последние 4 сообщений максимум (скорость)
     msgs = messages[-4:] if len(messages) > 4 else messages
@@ -165,6 +166,9 @@ def llm_reply(messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     cfg = _get_config()
     if not cfg:
         raise RuntimeError("LLM not configured")
+    if max_tokens is not None:
+        cfg = dict(cfg)
+        cfg["max_tokens"] = str(max_tokens)
 
     start = time.monotonic()
     last_err: Optional[Exception] = None

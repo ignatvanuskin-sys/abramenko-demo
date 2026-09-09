@@ -272,9 +272,9 @@ def test_master_step_in_booking(monkeypatch):
     assert "будни или выходные" not in r_branch
     # выбор мастера (несколько) или дата (один мастер)
     assert "мастер" in r_branch.lower() or "дату" in r_branch.lower()
-    # после даты показываются конкретные часы (один мастер «Анна» из демо-БД)
-    r_slots = reply(s, "завтра")
-    assert "свободные окна" in r_slots.lower() and "10:00" in r_slots, r_slots
+    # «завтра» на шаге мастера → дата → показываются конкретные часы
+    r_master = reply(s, "завтра")
+    assert "свободные окна" in r_master.lower() and "10:00" in r_master, r_master
     # выбор слота -> имя -> телефон -> appointment в БД
     reply(s, "1")
     reply(s, "Айгерим")
@@ -284,7 +284,6 @@ def test_master_step_in_booking(monkeypatch):
     chk = sqlite3.connect(db_path)
     cnt = chk.execute("SELECT COUNT(*) FROM appointments WHERE status='booked'").fetchone()[0]
     chk.close()
-    gc.collect()
     assert cnt >= 1, "appointment не создан в БД"
 
 

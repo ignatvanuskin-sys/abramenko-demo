@@ -862,7 +862,7 @@ def reply(state: DialogState, user_text: str) -> str:
         if "неважно" in sel or "любой" in sel:
             # оставляем master_id как None — выберем первого доступного при показе слотов
             pass
-        elif state.master_id is None:
+        elif state.master_id is None and not any(w in sel for w in ["сегодня", "завтра", "послезавтра", "недел", "числ", "числа", "числу"]):
             # пробуем найти мастера по имени
             try:
                 import os
@@ -883,8 +883,13 @@ def reply(state: DialogState, user_text: str) -> str:
             except Exception:
                 pass
             if state.master_id is None and not is_training_relevant(sel):
-                # не распознали имя мастера и это не услуга — переспросим вежливо
-                return "Напишите имя мастера (например, «Анна») или «неважно, кто из мастеров»."
+                # не распознали имя мастера, это не дата и не услуга — переспросим вежливо
+                return "Напишите имя мастера (например, «Анна»), «неважно, кто из мастеров» или дату (например, «завтра»)."
+            # дата вместо имени мастера — переходим в await_date
+            if state.master_id is None and any(w in sel for w in ["сегодня", "завтра", "послезавтра", "недел"]):
+                state.step = "await_date"
+                state.time_pref = sel
+                return _show_slots(state)
         # показываем слоты
         state.step = "await_slot"
         return _show_slots(state)

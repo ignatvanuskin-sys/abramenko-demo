@@ -65,7 +65,7 @@ WhatsApp ──► Meta Webhook ──┼──┴──► wa_id / session_id /
 ```
 
 - `bot_logic.reply(state, text)` — единственная бизнес-логика, принимает `str` и мутирует `DialogState`, возвращает `str`. Не знает про HTTP/Telegram/WhatsApp.
-- `session_store` — `InMemorySessionStore` per `user_id`/`UUID`, интерфейс `get/reset` → легко заменить на Redis/Postgres.
+- `session_store` — сессии переживают рестарт: Redis (`REDIS_URL`) → Postgres (`DATABASE_URL`, таблица `dialog_states`) → память. `DialogState.to_dict/from_dict`, `PersistentSessionStore` (Telegram) + shared L2 (web/WhatsApp).
 - `llm_client` — provider abstraction `LLM_PROVIDER=groq` `LLM_MODEL=openai/gpt-oss-120b` (1000 tok/s, 0.71s TTFT, $0.15/$0.60) + fallback `openai/gpt-4o-mini`, `temperature 0.2`, `max 180`, `timeout 5s`, 6 сообщений контекст, short prompt для Groq TPM 8k, `classify_on_topic` для off_topic. Без ключа — deterministic-only.
 - `whatsapp.py` — тонкий транспорт: `GET /webhook/whatsapp` (hub.mode/verify_token/challenge), `POST /webhook/whatsapp` (HMAC `X-Hub-Signature-256` fail-closed, parse `entry.changes.value.messages[].from/id/text.body`, dedup по `message_id`, `BackgroundTasks` → 200 ACK → `reply()` → Meta Send `POST https://graph.facebook.com/{v}/ {PHONE_ID}/messages` + `notify_admin`).
 - `web_api.py` — `POST /api/chat`/`/api/reset`/`GET /api/health` + static `web/`, тоже вызывает `reply`.
@@ -126,7 +126,7 @@ Groq `openai/gpt-oss-120b` primary (выбран после сравнения G
 
 ## 10. Тесты
 
-`pytest -q` → `157 passed`: `test_telegram` 15, `test_admin` 9, `test_web` 13, `test_branches_llm` 23, `test_llm_whatsapp` 15, `test_off_topic` 17, `test_training_fix` 9, `test_whatsapp_transport` 21, `test_classification` 7, `test_premium` 6, `test_production` 13, `test_booking_real` 4, `test_logic` 5. Плюс `beauty-booking-bot` 11 (slots, race `слот уже занят`, hardening, premium).
+`pytest -q` → `170 passed`: `test_telegram` 15, `test_admin` 9, `test_web` 13, `test_branches_llm` 23, `test_llm_whatsapp` 15, `test_off_topic` 17, `test_training_fix` 9, `test_whatsapp_transport` 21, `test_classification` 7, `test_premium` 6, `test_production` 13, `test_booking_real` 4, `test_logic` 5, `test_sessions_redis` 8, `test_tz_regression` 5. Плюс `beauty-booking-bot` 11 (slots, race `слот уже занят`, hardening, premium).
 
 ---
 
@@ -153,13 +153,15 @@ pytest -q
 
 ## 13. Что дальше
 
-Без переписывания `bot_logic`: подключить реальный WhatsApp Business (владелец даёт `WABA_ID`, `PHONE_NUMBER_ID`, `Access Token`, `App Secret`, `Verify Token`), затем заменить предпочтение `будни/выходные` на реальные слоты `10:00 12:30` через `Postgres` + `get_available_slots`/`create_booking` + Gemini tools (уже есть в `beauty-booking-bot`).
+Только внешнее (код готов, ждёт данных от Марии): реальный WhatsApp Business — прислать `WHATSAPP_TOKEN`, `PHONE_NUMBER_ID`, `WABA_ID`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET` (инструкция в README, статус в `GET /api/whatsapp/status`). Отдельный Redis-сервис — только после апгрейда Railway-плана (сейчас free-лимит исчерпан; сессии уже persistent через Postgres).
 
 ---
 
 ## 14. Статус
 
-`Web Demo: READY`, `Backend bot_logic: READY`, `Real WhatsApp transport: PASS` (157/157), `Real booking slots: MERGED (demo, за флагом `DEMO_BOOKING`)`, `Telegram admin: READY`, `Premium emoji: READY`.
+`Web Demo: READY`, `Backend bot_logic: READY`, `Real WhatsApp transport: READY (standby, ждёт 5 секретов от Марии — GET /api/whatsapp/status)`, `Real booking slots: LIVE (прод, EXCLUDE-констрейнт, TZ Asia/Almaty)`, `Telegram admin: READY`, `Premium emoji: READY (только таблица владельца + TG_PREMIUM_EMOJI_EXTRA)`, `Sessions persistent: READY (postgres, dialog_states)`.
+
+Готовность к продакшену: **100% всего, что зависит от кода**. Остаток — только внешние данные: секреты WhatsApp Business от Марии и (опционально) апгрейд Railway-плана под отдельный Redis.
 
 Следующий шаг после аудита — `Meta WhatsApp Cloud API` к уже готовому `reply()`.
 

@@ -159,7 +159,7 @@ pytest -q
 
 ## 14. Статус
 
-`Web Demo: READY`, `Backend bot_logic: READY`, `Real WhatsApp transport: READY (standby, ждёт 5 секретов от Марии — GET /api/whatsapp/status)`, `Real booking slots: LIVE (прод, EXCLUDE-констрейнт, TZ Asia/Almaty)`, `Telegram admin: READY`, `Premium emoji: READY (только таблица владельца + TG_PREMIUM_EMOJI_EXTRA)`, `Sessions persistent: READY (postgres, dialog_states)`.
+`Web Demo: READY`, `Backend bot_logic: READY`, `Real WhatsApp transport: READY (standby, ждёт 5 секретов от Марии — GET /api/whatsapp/status)`, `Booking: клиент сам называет дату/время (парсер «завтра в 14:00», без окон-номеров; конфликт → просьба назвать другое)`, `Telegram admin: READY`, `Premium emoji: READY (только таблица владельца + TG_PREMIUM_EMOJI_EXTRA)`, `Sessions persistent: READY (postgres, dialog_states)`.
 
 Готовность к продакшену: **100% всего, что зависит от кода**. Остаток — только внешние данные: секреты WhatsApp Business от Марии и (опционально) апгрейд Railway-плана под отдельный Redis.
 

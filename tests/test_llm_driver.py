@@ -104,6 +104,24 @@ def test_llm_repeat_is_not_template(monkeypatch):
         assert isinstance(r, str) and len(r) > 5
 
 
+def test_llm_empty_twice_falls_back_to_rule_based(monkeypatch):
+    """Groq вернул пустое 200 дважды — бот отвечает шаблоном, а не виснет."""
+    monkeypatch.setenv("LLM_API_KEY", "sk-test")
+    monkeypatch.delenv("DEMO_BOOKING", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    calls = []
+    def fake_empty(cfg, messages, temperature):
+        calls.append(1)
+        return ""
+    with patch("app.llm_client._call_openai_compatible", side_effect=fake_empty):
+        s = DialogState()
+        r = reply(s, "хочу записаться")
+        assert isinstance(r, str) and len(r) > 5
+        assert calls == [1, 1], calls  # первая попытка + один ретрай
+        # rule-based fallback собрал intent
+        assert s.intent == "booking"
+
+
 def test_llm_history_kept_and_capped(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "sk-test")
     monkeypatch.delenv("DEMO_BOOKING", raising=False)

@@ -260,7 +260,7 @@ def _ask_master(state) -> str:
         db_url = os.getenv("DATABASE_URL")
         if not db_url:
             raise ValueError("no db")
-        engine = create_engine(db_url)
+        engine = _db_engine(db_url)
         Session = sessionmaker(bind=engine)
         db = Session()
         # найти branch_id по имени
@@ -624,6 +624,15 @@ def _is_inside_booking_flow(state) -> bool:
     return state.intent is not None and state.step not in ("start", "done")
 
 
+def _db_engine(db_url: str):
+    """Движок с таймаутом коннекта для Postgres (без висов), plain для SQLite."""
+    from sqlalchemy import create_engine
+    if (db_url or "").startswith("postgres"):
+        return create_engine(db_url, connect_args={"connect_timeout": 5},
+                             pool_pre_ping=True, pool_recycle=300)
+    return create_engine(db_url)
+
+
 def _llm_should_drive() -> bool:
     """ИИ ведёт диалог, если настроен ключ. Иначе — rule-based fallback."""
     try:
@@ -776,7 +785,7 @@ def _resolve_ids(state) -> None:
             from .models import Branch, Master, Service
         except ImportError:
             from models import Branch, Master, Service
-        engine = create_engine(db_url)
+        engine = _db_engine(db_url)
         Session = sessionmaker(bind=engine)
         db = Session()
         try:
@@ -822,7 +831,7 @@ def _create_appointment_now(state):
         from zoneinfo import ZoneInfo as _ZI
         _resolve_ids(state)
         db_url = (os.getenv("DATABASE_URL") or "").strip()
-        engine = create_engine(db_url)
+        engine = _db_engine(db_url)
         Session = sessionmaker(bind=engine)
         db = Session()
         try:
@@ -923,7 +932,20 @@ def _llm_drive(state, user_text: str) -> str:
     content = (_LLM_DRIVER_RULES
                + f"\n[УЖЕ СОБРАНО: {collected}] [НЕ ХВАТАЕТ: {need or 'всё собрано'}]"
                + "\n[ДИАЛОГ:\n" + "\n".join(hist_lines) + "]")
-    raw = _llm_chat([{"role": "user", "content": content}], max_tokens=350)
+    raw = ""
+    try:
+        raw = _llm_chat([{"role": "user", "content": content}], max_tokens=350)
+    except Exception:
+        raw = ""
+    if not (raw or "").strip():
+        # Groq иногда отдаёт пустое 200 — один ретрай с пинком, потом fallback
+        try:
+            raw = _llm_chat([{"role": "user", "content": content + "\nОтветь СТРОГО JSON, без пустого ответа."}], max_tokens=350)
+        except Exception:
+            raw = ""
+    if not (raw or "").strip():
+        # пусто дважды — отдаём управление rule-based fallback в reply()
+        raise RuntimeError("llm empty after retry")
     data = None
     reply_text = None
     try:
@@ -1017,7 +1039,7 @@ def reply(state: DialogState, user_text: str) -> str:
                 from datetime import timezone
                 from zoneinfo import ZoneInfo as _ZI
                 db_url = os.getenv("DATABASE_URL")
-                engine = create_engine(db_url)
+                engine = _db_engine(db_url)
                 Session = sessionmaker(bind=engine)
                 db = Session()
                 b_id = getattr(state, "branch_id", 1) or 1
@@ -1377,7 +1399,7 @@ def reply(state: DialogState, user_text: str) -> str:
                 from .models import Master
                 db_url = os.getenv("DATABASE_URL")
                 if db_url:
-                    engine = create_engine(db_url)
+                    engine = _db_engine(db_url)
                     Session = sessionmaker(bind=engine)
                     db = Session()
                     for m in db.query(Master).all():
@@ -1413,7 +1435,7 @@ def reply(state: DialogState, user_text: str) -> str:
                     from sqlalchemy import create_engine as _ce
                     from sqlalchemy.orm import sessionmaker as _sm
                     from .models import Master as _M
-                    _eng = _ce(db_url)
+                    _eng = _db_engine(db_url)
                     _S = _sm(bind=_eng)
                     _db = _S()
                     for m in _db.query(_M).all():
@@ -1450,7 +1472,7 @@ def reply(state: DialogState, user_text: str) -> str:
                     from datetime import timezone
                     from zoneinfo import ZoneInfo
                     db_url = os.getenv("DATABASE_URL")
-                    engine = create_engine(db_url)
+                    engine = _db_engine(db_url)
                     Session = sessionmaker(bind=engine)
                     db = Session()
                     # подставим недостающие id если не выбраны

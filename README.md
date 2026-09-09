@@ -65,19 +65,20 @@ python -m pytest -q
 python tests/test_logic.py
 ```
 
-## Redis (сессии переживают рестарт)
+## Сессии переживают рестарт
 
-Без `REDIS_URL` всё работает как раньше (in-memory). С Redis диалоги не теряются при редеплое:
+Диалоги хранятся persistent: Redis (если задан `REDIS_URL`) → иначе Postgres
+(`DATABASE_URL`, таблица `dialog_states` в той же БД что бронирования) →
+иначе in-memory. На проде уже работает Postgres-вариант — ноль новой инфраструктуры.
+Проверка: `GET /api/health` → `"sessions_backend": "postgres"`.
 
 ```powershell
-# локально
+# локально persistent без Redis:
+$env:DATABASE_URL="sqlite:///demo.db"
+# опционально Redis вместо Postgres:
 docker run -d -p 6379:6379 redis:7
 $env:REDIS_URL="redis://localhost:6379/0"
 ```
-
-На Railway: добавить сервис Redis в тот же проект и выставить reference variable
-`REDIS_URL = ${{ Redis.REDIS_URL }}` на сервисе `abramenko-demo`.
-Проверка: `GET /api/health` → `"sessions_backend": "redis"`.
 
 ## WhatsApp (Meta Cloud API)
 

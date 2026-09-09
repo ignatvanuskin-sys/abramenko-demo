@@ -33,8 +33,11 @@ def test_dialog_state_from_dict_bad_input():
 
 def test_persistent_store_memory_fallback():
     os.environ.pop("REDIS_URL", None)
-    from app.session_store import PersistentSessionStore
-    store = PersistentSessionStore(prefix="test:")
+    os.environ.pop("DATABASE_URL", None)
+    from importlib import reload
+    import app.session_store as ss
+    reload(ss)
+    store = ss.PersistentSessionStore(prefix="test:")
     assert store.backend == "memory"
     st = store.get("u1")
     st.name = "Айгерим"
@@ -42,6 +45,31 @@ def test_persistent_store_memory_fallback():
     assert store.get("u1").name == "Айгерим"
     store.reset("u1")
     assert store.get("u1").name is None
+
+
+def test_persistent_store_postgres_sqlite(tmp_path):
+    os.environ.pop("REDIS_URL", None)
+    os.environ["DATABASE_URL"] = f"sqlite:///{tmp_path}/sess.db"
+    from importlib import reload
+    import app.session_store as ss
+    reload(ss)
+    try:
+        store = ss.PersistentSessionStore(prefix="t2:")
+        assert store.backend == "postgres"
+        st = store.get("u5")
+        st.name, st.step = "Айгерим", "await_phone"
+        store.set("u5", st)
+        # новый инстанс = имитация рестарта: состояние пережило
+        store2 = ss.PersistentSessionStore(prefix="t2:")
+        r = store2.get("u5")
+        assert r.name == "Айгерим" and r.step == "await_phone"
+        # shared helpers (web/WhatsApp L2)
+        ss.save_shared_state("web:", "s1", st)
+        assert ss.load_shared_state("web:", "s1").name == "Айгерим"
+        assert ss.sessions_backend_name() == "postgres"
+    finally:
+        os.environ.pop("DATABASE_URL", None)
+        reload(ss)
 
 
 def test_persistent_store_bad_redis_falls_back():

@@ -32,51 +32,38 @@ _MAX_BODY = 1_000_000
 
 GRAPH_VERSION_DEFAULT = "v21.0"
 
-# Redis L2 для WA-сессий (переживает рестарт). Без REDIS_URL — чистый in-memory.
+# Persistent L2 для WA-сессий (переживает рестарт): Redis → Postgres → память.
 _WA_REDIS_PREFIX = "wa:"
-_wa_redis = None
-_wa_redis_tried = False
-
-def _wa_redis_client():
-    global _wa_redis, _wa_redis_tried
-    if _wa_redis_tried:
-        return _wa_redis
-    _wa_redis_tried = True
-    try:
-        from .session_store import get_redis_client
-    except ImportError:
-        from session_store import get_redis_client
-    _wa_redis = get_redis_client()
-    if _wa_redis is not None:
-        logger.info("whatsapp sessions: redis backend")
-    return _wa_redis
 
 def _get_state(wa_id: str) -> DialogState:
     import time as _time
     now = _time.monotonic()
     if wa_id not in _WA_STORE:
-        r = _wa_redis_client()
         restored = None
-        if r is not None:
-            try:
-                from .session_store import load_persistent_state
-            except ImportError:
-                from session_store import load_persistent_state
-            restored = load_persistent_state(r, _WA_REDIS_PREFIX, wa_id)
+        try:
+            from .session_store import load_shared_state
+        except ImportError:
+            from session_store import load_shared_state
+        try:
+            restored = load_shared_state(_WA_REDIS_PREFIX, wa_id)
+        except Exception:
+            restored = None
         _WA_STORE[wa_id] = restored if restored is not None else DialogState()
     _WA_SEEN[wa_id] = now
     _prune_sessions(now)
     return _WA_STORE[wa_id]
 
 def _save_state(wa_id: str) -> None:
-    r = _wa_redis_client()
-    if r is None or wa_id not in _WA_STORE:
+    if wa_id not in _WA_STORE:
         return
     try:
-        from .session_store import save_persistent_state
+        from .session_store import save_shared_state
     except ImportError:
-        from session_store import save_persistent_state
-    save_persistent_state(r, _WA_REDIS_PREFIX, wa_id, _WA_STORE[wa_id])
+        from session_store import save_shared_state
+    try:
+        save_shared_state(_WA_REDIS_PREFIX, wa_id, _WA_STORE[wa_id])
+    except Exception:
+        pass
 
 def _prune_sessions(now: float | None = None) -> None:
     import time as _time

@@ -71,15 +71,16 @@ def _check_rate(session_id: str, now: float | None = None, limit: int | None = N
 def _get_state(session_id: str) -> DialogState:
     import time as _time
     if session_id not in _WEB_STORE:
-        # L2: подхватить пережившую рестарт сессию из Redis
-        r = _redis_client()
+        # L2: подхватить пережившую рестарт сессию
         restored = None
-        if r is not None:
-            try:
-                from .session_store import load_persistent_state
-            except ImportError:
-                from session_store import load_persistent_state
-            restored = load_persistent_state(r, _REDIS_PREFIX, session_id)
+        try:
+            from .session_store import load_shared_state
+        except ImportError:
+            from session_store import load_shared_state
+        try:
+            restored = load_shared_state(_REDIS_PREFIX, session_id)
+        except Exception:
+            restored = None
         _WEB_STORE[session_id] = restored if restored is not None else DialogState()
     _WEB_SEEN[session_id] = _time.monotonic()
     _prune_sessions()
@@ -87,14 +88,16 @@ def _get_state(session_id: str) -> DialogState:
 
 
 def _save_state(session_id: str) -> None:
-    r = _redis_client()
-    if r is None or session_id not in _WEB_STORE:
+    if session_id not in _WEB_STORE:
         return
     try:
-        from .session_store import save_persistent_state
+        from .session_store import save_shared_state
     except ImportError:
-        from session_store import save_persistent_state
-    save_persistent_state(r, _REDIS_PREFIX, session_id, _WEB_STORE[session_id])
+        from session_store import save_shared_state
+    try:
+        save_shared_state(_REDIS_PREFIX, session_id, _WEB_STORE[session_id])
+    except Exception:
+        pass
 
 # Bot для admin notify — лениво, чтобы тесты не требовали токена
 _bot_instance = None
@@ -121,24 +124,20 @@ def _web_buttons_for_step(step: str) -> List[str]:
         return []  # input с placeholder, не кнопки
     return []
 
-# Redis L2 для web-сессий (переживает рестарт). Без REDIS_URL — чистый in-memory.
+# Persistent L2 для web-сессий (переживает рестарт): Redis → Postgres → память.
+# Без REDIS_URL и DATABASE_URL — чистый in-memory.
 _REDIS_PREFIX = "web:"
-_redis = None
-_redis_tried = False
 
-def _redis_client():
-    global _redis, _redis_tried
-    if _redis_tried:
-        return _redis
-    _redis_tried = True
+
+def _backend_name() -> str:
     try:
-        from .session_store import get_redis_client
+        from .session_store import sessions_backend_name
     except ImportError:
-        from session_store import get_redis_client
-    _redis = get_redis_client()
-    if _redis is not None:
-        logger.info("web sessions: redis backend")
-    return _redis
+        from session_store import sessions_backend_name
+    try:
+        return sessions_backend_name()
+    except Exception:
+        return "memory"
 
 def _get_bot():
     global _bot_instance
@@ -202,7 +201,7 @@ except Exception as e:
 @app.get("/api/health")
 def health():
     return {"status": "ok", "sessions": len(_WEB_STORE),
-            "sessions_backend": "redis" if _redis_client() is not None else "memory"}
+            "sessions_backend": _backend_name()}
 
 @app.get("/api/metrics")
 def metrics():
@@ -235,7 +234,7 @@ async def _lifespan(app: FastAPI):
         bool(os.getenv("TELEGRAM_BOT_TOKEN")),
         bool(os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY") or os.getenv("LLM_API_KEY")),
         bool(os.getenv("WHATSAPP_APP_SECRET")),
-        ("redis" if _redis_client() is not None else "memory"),
+        _backend_name(),
     )
     try:
         from .whatsapp import whatsapp_status
